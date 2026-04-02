@@ -111,5 +111,8 @@
   "scripts": {
     "launch:extension": "node scripts/launch-extension.js",
     "verify": "npm run launch:extension"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.7.1"
   }
 }
