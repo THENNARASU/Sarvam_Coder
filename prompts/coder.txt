@@ -242,6 +242,16 @@ def calculate_sum(items):
 >>>>>>> REPLACE
 ```
 
+To **delete lines**, leave the REPLACE section completely empty (nothing between ======= and >>>>>>>):
+```
+<<<<<<< SEARCH
+:start_line:2
+-------
+# duplicate line to remove
+=======
+>>>>>>> REPLACE
+```
+
 
 Usage:
 <apply_diff>
@@ -361,6 +371,12 @@ Description: Request to execute a CLI command on the system. Use this when you n
 Parameters:
 - command: (required) The CLI command to execute. This should be valid for the current operating system. Ensure the command is properly formatted and does not contain any harmful instructions.
 - cwd: (optional) The working directory to execute the command in (default: <baseDirectory>)
+- session_id: (optional) Reuse an existing interactive shell session. If omitted, a new shell session is created.
+- wait_for_completion: (optional, default: true) If true, wait for command completion and capture output. If false, start command and return immediately while the shell remains interactive.
+- timeout_ms: (optional, default: 15000) Max wait time when wait_for_completion is true. On timeout, return partial/latest output and keep the command/session running.
+- reveal_terminal: (optional, default: true) If true, focus the terminal so the user can interact directly.
+- read_output: (optional, default: false) If true, read the latest transcript from session_id without running a command.
+- close_session: (optional, default: false) If true, close session_id and return the final transcript tail.
 Usage:
 <execute_command>
 <command>Your command here</command>
@@ -376,6 +392,19 @@ Example: Requesting to execute ls in a specific directory if directed
 <execute_command>
 <command>ls -la</command>
 <cwd>/home/user/projects</cwd>
+</execute_command>
+
+Example: Start an interactive command and continue conversation
+<execute_command>
+<command>npm run dev</command>
+<wait_for_completion>false</wait_for_completion>
+<reveal_terminal>true</reveal_terminal>
+</execute_command>
+
+Example: Read live output from an existing shell session
+<execute_command>
+<session_id>sabc123</session_id>
+<read_output>true</read_output>
 </execute_command>
 
 ## ask_followup_question

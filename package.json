@@ -1,8 +1,8 @@
 {
   "name": "sarvam-coder",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Sarvam Coder VS Code extension with Read/Write/Execute only",
+  "description": "Sarvam Coder - Code with AI assistance, right in your editor. Powered by Sarvam's advanced agent capabilities, Sarvam Coder helps you write, understand, and debug code faster than ever. Whether you're a beginner or an experienced developer, Sarvam Coder is your intelligent coding companion.",
   "displayName": "Sarvam Coder",
   "icon": "resources/sarvam.png",
   "publisher": "AllyTopic",
@@ -29,7 +29,7 @@
       "properties": {
         "sarvamCoder.autoApprove.read": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "Auto-approve read_file tool requests."
         },
         "sarvamCoder.autoApprove.write": {
@@ -42,19 +42,14 @@
           "default": false,
           "description": "Auto-approve execute_command tool requests."
         },
-        "sarvamCoder.autoApprove.todo": {
-          "type": "boolean",
-          "default": false,
-          "description": "Auto-approve update_todo_list tool requests."
-        },
         "sarvamCoder.execute.captureMode": {
           "type": "string",
           "enum": [
             "process",
             "terminal"
           ],
-          "default": "process",
-          "description": "How execute_command runs shell commands. 'process' captures output without terminal markers; 'terminal' uses the shared terminal and shows markers."
+          "default": "terminal",
+          "description": "How execute_command runs shell commands. 'terminal' starts a real shell session with interactive support and transcript capture; 'process' runs in-process for non-interactive use."
         },
         "sarvamCoder.execute.allowCwdOverride": {
           "type": "boolean",
@@ -99,7 +94,7 @@
         {
           "id": "sarvam",
           "title": "Sarvam",
-          "icon": "resources/sarvam.svg"
+          "icon": "resources/sarvam.png"
         }
       ]
     },

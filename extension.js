@@ -3,9 +3,8 @@ const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
 const { buildSystemPrompt } = require("./lib/prompt");
-const { streamChatCompletions } = require("./lib/openai");
+const { streamChatCompletions } = require("./lib/sarvam");
 const { extractToolCall, runTool } = require("./lib/tools");
-const { writeInitialCheckpoint } = require("./lib/checkpoints");
 const { exec } = require("child_process");
 
 function registerDevAutoReload(context) {
@@ -58,11 +57,13 @@ function buildWebviewHtml(webview, extensionUri, initialState) {
 <body>
   <div class="shell" data-first-run="${initialState.firstRun ? "true" : "false"}" data-has-conversation="${initialState.hasConversation ? "true" : "false"}" data-sarvam-icon="${iconUri}" style="--sarvam-icon: url('${iconUri}')">
     <header class="topbar">
-      <span class="brand">Sarvam Coder</span>
+      <div class="brand-logo-frame" aria-label="Sarvam Coder">
+        <img class="brand-logo" src="${iconUri}" alt="Sarvam Coder" />
+      </div>
       <div class="topbar-actions">
-        <button class="task-add" type="button" aria-label="Add task">Add Task</button>
-        <button class="task-history" type="button" aria-label="Task history">Task History</button>
-          <button class="settings-toggle" type="button" aria-label="Open settings">Settings</button>
+        <button class="task-add" type="button" aria-label="Add task">New</button>
+        <button class="task-history" type="button" aria-label="Task history">History</button>
+        <button class="settings-toggle" type="button" aria-label="Open settings">Settings</button>
       </div>
     </header>
     <section class="history-view" aria-label="Task history" aria-hidden="true">
@@ -100,7 +101,7 @@ function buildWebviewHtml(webview, extensionUri, initialState) {
           Context Window Size
           <input name="contextWindow" type="number" min="1024" step="1" value="${settings.contextWindow || ""}" />
         </label>
-        <p class="hint">Total tokens (input + output) the model can process.</p>
+        <p class="hint">Total tokens (input and output)</p>
         <p class="error" data-error="settings" hidden>All fields are required.</p>
       </form>
     </aside>
@@ -127,7 +128,7 @@ function buildWebviewHtml(webview, extensionUri, initialState) {
           Context Window Size
           <input name="contextWindow" type="number" min="1024" step="1" value="${settings.contextWindow || ""}" />
         </label>
-        <p class="hint">Total tokens (input + output) the model can process.</p>
+        <p class="hint">Total tokens (input and output).</p>
         <p class="error" data-error="welcome" hidden>All fields are required.</p>
         <button type="submit">Let's go!</button>
       </form>
@@ -156,7 +157,7 @@ function buildWebviewHtml(webview, extensionUri, initialState) {
       </div>
       <div class="conversation" aria-live="polite"></div>
       <div class="tool-approval" hidden>
-        <div class="tool-approval__title">Tool Request</div>
+        <div class="tool-approval__title">Waiting for approval</div>
         <pre class="tool-approval__body"></pre>
         <div class="tool-approval__actions">
           <button class="tool-approve" type="button">Approve</button>
@@ -180,14 +181,25 @@ function buildWebviewHtml(webview, extensionUri, initialState) {
       </div>
       <div class="ready-input" aria-label="Task input">
         <textarea rows="3" placeholder="Type your coding tasks here"></textarea>
-        <button class="send-button" type="button">Send</button>
+        <div class="ready-input-actions">
+          <button class="send-button" type="button" aria-label="Send" title="Send">&gt;</button>
+          <button class="stop-button" type="button" aria-label="Stop request" title="Stop request" hidden>&#9632;</button>
+        </div>
       </div>
-      <div class="auto-approve">Auto-approve: <span data-auto-approve>None</span></div>
+      <div class="auto-approve" role="group" aria-label="Auto Approve">
+        <span class="auto-approve__title">Auto Approve:</span>
+        <label class="auto-approve__option">Read <input type="checkbox" data-auto-approve-read /></label>
+        <label class="auto-approve__option">Write <input type="checkbox" data-auto-approve-write /></label>
+        <label class="auto-approve__option">Run <input type="checkbox" data-auto-approve-execute /></label>
+      </div>
     </section>
     <aside class="eventlog-view" aria-label="Event log" aria-hidden="true">
       <div class="eventlog-header">
         <div class="eventlog-title">Background Log</div>
-        <button class="eventlog-close" type="button">Done</button>
+        <div class="eventlog-header-actions">
+          <button class="eventlog-copy" type="button">Copy</button>
+          <button class="eventlog-close" type="button">Done</button>
+        </div>
       </div>
       <div class="eventlog-list"></div>
     </aside>
@@ -225,17 +237,17 @@ function showSystemPromptPanel(context, prompt) {
   <style>
     body {
       margin: 16px;
-      font-family: "Segoe UI", sans-serif;
-      color: #1c1b1a;
-      background: #ffffff;
+      font-family: var(--vscode-font-family, "Segoe UI", sans-serif);
+      color: var(--vscode-editor-foreground);
+      background: var(--vscode-editor-background);
     }
     pre {
       white-space: pre-wrap;
       word-break: break-word;
-      font-family: "Consolas", "Courier New", monospace;
+      font-family: var(--vscode-editor-font-family, "Consolas", "Courier New", monospace);
       font-size: 12px;
-      background: #f5f4f1;
-      border: 1px solid #d7d3cd;
+      background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+      border: 1px solid var(--vscode-panel-border, var(--vscode-contrastBorder));
       border-radius: 8px;
       padding: 12px;
     }
@@ -286,16 +298,25 @@ function saveSarvamState(workspaceFolder, state) {
   fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
 }
 
-function getAutoApproveConfig() {
+function getDefaultAutoApproveConfig() {
   return {
-    read: false,
+    read: true,
     write: false,
-    execute: false,
-    other: true
+    execute: false
   };
 }
 
-function createHistoryEntry(role, displayText, rawText, modelText) {
+function normalizeAutoApproveConfig(value) {
+  const defaults = getDefaultAutoApproveConfig();
+  const input = value && typeof value === "object" ? value : {};
+  return {
+    read: typeof input.read === "boolean" ? input.read : defaults.read,
+    write: typeof input.write === "boolean" ? input.write : defaults.write,
+    execute: typeof input.execute === "boolean" ? input.execute : defaults.execute
+  };
+}
+
+function createHistoryEntry(role, displayText, rawText, modelText, options = {}) {
   let displayValue = displayText || "";
   const rawValue = rawText || "";
   if (!displayValue && rawValue && role !== "assistant") {
@@ -307,7 +328,8 @@ function createHistoryEntry(role, displayText, rawText, modelText) {
     content: displayValue,
     display: displayValue,
     raw: rawValue,
-    model: modelText || displayValue || ""
+    model: modelText || displayValue || "",
+    checkpoint: options.checkpoint || null
   };
 }
 
@@ -332,7 +354,8 @@ function normalizeHistoryEntry(entry) {
     content: displayText,
     display: displayText,
     raw: rawText,
-    model: modelText
+    model: modelText,
+    checkpoint: entry.checkpoint || null
   };
 }
 
@@ -352,6 +375,10 @@ function buildModelMessages(systemPrompt, history) {
     .filter((entry) => {
       const raw = entry.raw || "";
       const content = entry.model || entry.content || "";
+      const compactContent = String(content || "").trim();
+      if ((entry.role === "tool-execution" || entry.role === "tool_execution") && /^Checkpoint created\b/i.test(compactContent)) {
+        return false;
+      }
       if (entry.role === "assistant" && (!content || content === "(tool call)") && toolTagRegex.test(raw)) {
         return false;
       }
@@ -383,20 +410,210 @@ function buildDisplayHistory(history) {
     return {
       role: normalized.role,
       content: displayText,
-      raw: normalized.raw || ""
+      raw: normalized.raw || "",
+      checkpoint: normalized.checkpoint || null
     };
   });
 }
 
-function createCheckpoint(workspaceFolder, payload, label) {
-  const root = path.join(workspaceFolder, ".sarvam", "checkpoints");
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const fileName = `${timestamp}-${label}.json`;
+function getCheckpointRoot(workspaceFolder) {
+  return path.join(workspaceFolder, ".sarvam", "checkpoints");
+}
+
+function sanitizeCheckpointLabel(value) {
+  return String(value || "checkpoint")
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48) || "checkpoint";
+}
+
+function createRestoreCheckpoint(workspaceFolder, payload) {
+  const root = getCheckpointRoot(workspaceFolder);
+  const timestamp = new Date().toISOString();
+  const stamp = timestamp.replace(/[:.]/g, "-");
+  const checkpointId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const label = payload.label || `Before ${payload.toolName || "write"}: ${payload.targetPath || "file"}`;
+  const fileName = `${stamp}-${sanitizeCheckpointLabel(payload.taskId || "task")}-${sanitizeCheckpointLabel(payload.toolName || "write")}.json`;
   const filePath = path.join(root, fileName);
-  const fs = require("fs");
+  const checkpoint = {
+    id: checkpointId,
+    timestamp,
+    taskId: payload.taskId || "",
+    label,
+    toolName: payload.toolName || "",
+    toolCall: payload.toolCall || "",
+    checkpointType: payload.checkpointType || "snapshot",
+    gitStashId: payload.gitStashId || null,
+    files: Array.isArray(payload.files) ? payload.files : []
+  };
   fs.mkdirSync(root, { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf8");
-  return filePath;
+  fs.writeFileSync(filePath, JSON.stringify(checkpoint, null, 2), "utf8");
+  return {
+    ...checkpoint,
+    checkpointFile: path.relative(workspaceFolder, filePath)
+  };
+}
+
+function restoreCheckpointSnapshot(workspaceFolder, checkpoint) {
+  const checkpointType = String(checkpoint?.checkpointType || "snapshot").toLowerCase();
+  
+  if (checkpointType === "git" && checkpoint?.gitStashId) {
+    // Git-based checkpoint: attempt restore via git stash pop
+    const stashId = checkpoint.gitStashId;
+    exec(`git stash pop ${stashId}`, { cwd: workspaceFolder }, (error) => {
+      if (error) {
+        console.warn(`Failed to restore git stash ${stashId}: ${error.message}`);
+      }
+    });
+    return;
+  }
+  
+  // Snapshot-based checkpoint: restore files
+  const snapshots = Array.isArray(checkpoint?.files) ? checkpoint.files : [];
+  if (!snapshots.length) {
+    throw new Error("Checkpoint has no restorable file snapshots.");
+  }
+  snapshots.forEach((snapshot) => {
+    const targetPath = String(snapshot.path || "").trim();
+    if (!targetPath) {
+      return;
+    }
+    const absolutePath = ensureWorkspacePath(workspaceFolder, targetPath);
+    const existedBefore = Boolean(snapshot.existedBefore);
+    if (!existedBefore) {
+      if (fs.existsSync(absolutePath)) {
+        fs.unlinkSync(absolutePath);
+      }
+      return;
+    }
+    fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+    fs.writeFileSync(absolutePath, String(snapshot.content || ""), "utf8");
+  });
+}
+
+function deleteCheckpointFile(workspaceFolder, checkpoint) {
+  const checkpointFile = checkpoint && checkpoint.checkpointFile ? String(checkpoint.checkpointFile) : "";
+  if (!checkpointFile) {
+    return;
+  }
+  const absolutePath = ensureWorkspacePath(workspaceFolder, checkpointFile);
+  if (fs.existsSync(absolutePath)) {
+    fs.unlinkSync(absolutePath);
+  }
+}
+
+function deleteTaskCheckpoints(workspaceFolder, task) {
+  const taskId = String(task?.id || task?.taskId || "").trim();
+  const checkpointList = Array.isArray(task?.checkpoints) ? task.checkpoints : [];
+  const knownIds = new Set(
+    checkpointList
+      .map((checkpoint) => String(checkpoint?.id || "").trim())
+      .filter(Boolean)
+  );
+  const files = listCheckpointFiles(workspaceFolder);
+
+  checkpointList.forEach((checkpoint) => {
+    try {
+      deleteCheckpointFile(workspaceFolder, checkpoint);
+    } catch (error) {
+      // Ignore checkpoint cleanup failures for deleted tasks.
+    }
+  });
+
+  files.forEach((filePath) => {
+    try {
+      const checkpoint = readCheckpointFile(filePath);
+      const fileTaskId = String(checkpoint?.taskId || "").trim();
+      const checkpointId = String(checkpoint?.id || "").trim();
+      const shouldDelete =
+        (taskId && fileTaskId === taskId) ||
+        (checkpointId && knownIds.has(checkpointId));
+      if (shouldDelete) {
+        fs.unlinkSync(filePath);
+      }
+    } catch (error) {
+      if (taskId && path.basename(filePath).toLowerCase().includes(taskId.toLowerCase())) {
+        try {
+          fs.unlinkSync(filePath);
+        } catch (cleanupError) {
+          // Ignore checkpoint cleanup failures for deleted tasks.
+        }
+      }
+    }
+  });
+}
+
+function isGitRepository(workspaceFolder) {
+  const gitDir = path.join(workspaceFolder, ".git");
+  return fs.existsSync(gitDir);
+}
+
+function createGitStash(workspaceFolder, taskId, toolName) {
+  return new Promise((resolve) => {
+    const stashLabel = `sarvam-${sanitizeCheckpointLabel(taskId)}-${sanitizeCheckpointLabel(toolName)}`;
+    exec(`git stash push -m "${stashLabel}"`, { cwd: workspaceFolder }, (error) => {
+      if (error) {
+        resolve(null);
+        return;
+      }
+      resolve({ type: "git", stashLabel, toolName, taskId });
+    });
+  });
+}
+
+function getLatestGitStashId(workspaceFolder) {
+  return new Promise((resolve) => {
+    exec("git stash list --format=%i | head -1", { cwd: workspaceFolder }, (error, stdout) => {
+      if (error || !stdout) {
+        resolve(null);
+        return;
+      }
+      resolve(stdout.trim());
+    });
+  });
+}
+
+function restoreGitStash(workspaceFolder, stashId) {
+  return new Promise((resolve) => {
+    exec(`git stash pop ${stashId}`, { cwd: workspaceFolder }, (error) => {
+      if (error) {
+        resolve(false);
+        return;
+      }
+      resolve(true);
+    });
+  });
+}
+
+function pruneTaskAfterCheckpoint(workspaceFolder, task, checkpointId) {
+  if (!task || !checkpointId) {
+    return;
+  }
+
+  const history = Array.isArray(task.history) ? task.history : [];
+  const checkpointIndexInHistory = history.findIndex((entry) => {
+    const entryCheckpointId = String(entry?.checkpoint?.id || "").trim();
+    return entryCheckpointId === String(checkpointId).trim();
+  });
+  if (checkpointIndexInHistory >= 0) {
+    task.history = history.slice(0, checkpointIndexInHistory + 1);
+  }
+
+  const checkpoints = Array.isArray(task.checkpoints) ? task.checkpoints : [];
+  const checkpointIndex = checkpoints.findIndex((item) => String(item?.id || "").trim() === String(checkpointId).trim());
+  if (checkpointIndex > 0) {
+    const newer = checkpoints.slice(0, checkpointIndex);
+    newer.forEach((checkpoint) => {
+      try {
+        deleteCheckpointFile(workspaceFolder, checkpoint);
+      } catch (error) {
+        // Ignore cleanup failures while pruning newer checkpoints.
+      }
+    });
+    task.checkpoints = checkpoints.slice(checkpointIndex);
+  }
+  task.followup = null;
 }
 
 function stripToolXml(text) {
@@ -456,7 +673,7 @@ function summarizeToolArgs(args) {
     return "";
   }
   const keys = Object.keys(args)
-    .filter((key) => !["tool_call", "arg_key", "arg_value"].includes(key))
+    .filter((key) => !["tool_call", "arg_key", "arg_value", "raw"].includes(key))
     .slice(0, 4);
   if (!keys.length) {
     return "";
@@ -471,12 +688,52 @@ function summarizeToolArgs(args) {
 function summarizeToolRequest(toolCall) {
   const name = toolCall.name || "tool";
   const args = toolCall.args || {};
-  const firstArg = (key) => (args[key] && args[key][0] ? String(args[key][0]) : "");
-  if (name === "read_file") {
+  const rawPayload = String(toolCall.raw || "");
+  const firstRawTag = (tag) => {
+    if (!rawPayload) {
+      return "";
+    }
+    const pattern = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "i");
+    const match = rawPayload.match(pattern);
+    return match && match[1] ? String(match[1]).trim() : "";
+  };
+  const allRawTags = (tag) => {
+    if (!rawPayload) {
+      return [];
+    }
+    const pattern = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "gi");
+    const values = [];
+    let match;
+    while ((match = pattern.exec(rawPayload))) {
+      const value = match && match[1] ? String(match[1]).trim() : "";
+      if (value) {
+        values.push(value);
+      }
+    }
+    return values;
+  };
+  const firstArg = (key) => {
+    const direct = args[key] && args[key][0] ? String(args[key][0]).trim() : "";
+    if (direct) {
+      return direct;
+    }
+    return firstRawTag(key);
+  };
+  const pathArg = () => {
     const paths = (args.path || []).map((value) => String(value).trim()).filter(Boolean);
+    if (!paths.length) {
+      paths.push(...allRawTags("path"));
+    }
+    if (!paths.length) {
+      return "";
+    }
+    return [...new Set(paths)].join(", ");
+  };
+  if (name === "read_file") {
+    const paths = pathArg();
     return {
       title: "Read file",
-      detail: paths.length ? paths.join(", ") : "(no path)"
+      detail: paths || "(no path)"
     };
   }
   if (name === "write_to_file") {
@@ -499,7 +756,8 @@ function summarizeToolRequest(toolCall) {
   }
   if (name === "insert_content") {
     const pathValue = firstArg("path") || "(no path)";
-    const lineValue = firstArg("line") ? `line ${firstArg("line")}` : "";
+    const lineRaw = firstArg("line");
+    const lineValue = lineRaw ? `line ${lineRaw}` : "";
     return {
       title: "Edit file (insert content)",
       detail: [pathValue, lineValue].filter(Boolean).join(" | ")
@@ -513,6 +771,36 @@ function summarizeToolRequest(toolCall) {
   }
   if (name === "update_todo_list") {
     return { title: "Update todo list", detail: "" };
+  }
+  if (name === "list_files") {
+    const pathValue = pathArg() || ".";
+    const recursiveValue = firstArg("recursive");
+    return {
+      title: "List files",
+      detail: recursiveValue ? `${pathValue} | recursive: ${recursiveValue}` : pathValue
+    };
+  }
+  if (name === "search_files") {
+    const pathValue = pathArg() || ".";
+    const regexValue = firstArg("regex");
+    const filePatternValue = firstArg("file_pattern");
+    const detailParts = [pathValue];
+    if (regexValue) {
+      detailParts.push(`regex: ${truncateText(regexValue, 80)}`);
+    }
+    if (filePatternValue) {
+      detailParts.push(`pattern: ${filePatternValue}`);
+    }
+    return {
+      title: "Search files",
+      detail: detailParts.join(" | ")
+    };
+  }
+  if (name === "list_code_definition_names") {
+    return {
+      title: "List code definitions",
+      detail: pathArg() || firstArg("path") || "."
+    };
   }
   return { title: name, detail: summarizeToolArgs(args) };
 }
@@ -565,6 +853,32 @@ function summarizeMessages(messages, limit) {
   }));
 }
 
+function normalizeArgsForSignature(toolName, args) {
+  if (!args || typeof args !== "object") {
+    return {};
+  }
+  const normalizedToolName = String(toolName || "").trim().toLowerCase();
+  const ignoredKeys = new Set(["raw"]);
+  if (normalizedToolName === "write_to_file") {
+    ignoredKeys.add("line_count");
+  }
+  const normalized = {};
+  Object.keys(args)
+    .filter((key) => !ignoredKeys.has(key))
+    .sort()
+    .forEach((key) => {
+      const value = args[key];
+      if (Array.isArray(value)) {
+        normalized[key] = value.map((item) => String(item));
+      } else if (value == null) {
+        normalized[key] = "";
+      } else {
+        normalized[key] = String(value);
+      }
+    });
+  return normalized;
+}
+
 function parseFollowupOptions(toolCall) {
   const args = toolCall.args || {};
   const question = (args.question && args.question[0]) || "";
@@ -607,21 +921,107 @@ function escapeToolResultForModel(result) {
   if (!result) {
     return "";
   }
-  return String(result)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  return String(result);
 }
 
 function extractAttemptCompletion(text) {
   if (!text) {
     return "";
   }
-  const match = String(text).match(/<attempt_completion>[\s\S]*?<result>([\s\S]*?)<\/result>[\s\S]*?<\/attempt_completion>/i);
-  if (!match) {
+  const source = String(text);
+  const decoded = source
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&");
+
+  const patterns = [
+    /<attempt_completion\b[^>]*>[\s\S]*?<result\b[^>]*>([\s\S]*?)<\/result>[\s\S]*?<\/attempt_completion>/i,
+    /<attempt_completion\b[^>]*>[\s\S]*?<result\b[^>]*>([\s\S]*?)<\/result>/i,
+    /<attempt_completion\b[^>]*>([\s\S]*?)<\/attempt_completion>/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = decoded.match(pattern);
+    if (match && match[1]) {
+      const value = String(match[1]).trim();
+      if (value) {
+        return value;
+      }
+    }
+  }
+
+  // Streaming fallback: tolerate truncated XML where closing tags may be missing.
+  const attemptStart = decoded.search(/<attempt_completion\b[^>]*>/i);
+  if (attemptStart >= 0) {
+    const afterAttempt = decoded.slice(attemptStart);
+    const resultOpenMatch = afterAttempt.match(/<result\b[^>]*>/i);
+    if (resultOpenMatch) {
+      const resultStart = afterAttempt.indexOf(resultOpenMatch[0]) + resultOpenMatch[0].length;
+      const tail = afterAttempt.slice(resultStart);
+      const resultCloseIndex = tail.search(/<\/result>/i);
+      const attemptCloseIndex = tail.search(/<\/attempt_completion>/i);
+      let endIndex = tail.length;
+      if (resultCloseIndex >= 0) {
+        endIndex = resultCloseIndex;
+      } else if (attemptCloseIndex >= 0) {
+        endIndex = attemptCloseIndex;
+      }
+      const looseValue = tail.slice(0, endIndex).trim();
+      if (looseValue) {
+        return looseValue;
+      }
+    }
+  }
+
+  return "";
+}
+
+function countToolCallTags(text) {
+  if (!text) {
+    return 0;
+  }
+  // Count only executable/in-band tool tags. `title_name` is metadata and
+  // should not block execution when emitted alongside a real tool call.
+  const allowedToolNames = [
+    "read_file",
+    "write_to_file",
+    "execute_command",
+    "update_todo_list",
+    "list_files",
+    "search_files",
+    "list_code_definition_names",
+    "apply_diff",
+    "insert_content",
+    "search_and_replace",
+    "fetch_instructions",
+    "ask_followup_question",
+    "new_task",
+    "switch_mode"
+  ];
+  const escaped = allowedToolNames.map((name) => name.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&"));
+  const regex = new RegExp(`<\\s*(?:${escaped.join("|")})\\b`, "gi");
+  const matches = String(text).match(regex);
+  return matches ? matches.length : 0;
+}
+
+function extractInlineTitleValue(text) {
+  if (!text) {
     return "";
   }
-  return String(match[1]).trim();
+  const source = String(text);
+  const nestedMatch = source.match(/<title_name>[\s\S]*?<value>([\s\S]*?)<\/value>[\s\S]*?<\/title_name>/i);
+  if (nestedMatch && nestedMatch[1]) {
+    return String(nestedMatch[1]).trim();
+  }
+  const directMatch = source.match(/<title_name[^>]*>([\s\S]*?)<\/title_name>/i);
+  if (!directMatch || !directMatch[1]) {
+    return "";
+  }
+  const inner = String(directMatch[1]).trim();
+  if (!inner || inner.startsWith("<")) {
+    return "";
+  }
+  return inner;
 }
 
 function readFileSafe(filePath) {
@@ -743,112 +1143,345 @@ function scheduleDiffAutoClose(beforeUri, afterUri, delayMs) {
   }, closeDelay);
 }
 
-async function showDiffPreview(filePath, beforeText, afterText, label) {
+function writeDiffBaselineFile(workspaceFolder, filePath, beforeText) {
+  const previewRoot = path.join(workspaceFolder, ".sarvam", "preview");
+  fs.mkdirSync(previewRoot, { recursive: true });
+  const baseName = path.basename(filePath);
+  const stamp = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const tempPath = path.join(previewRoot, `${baseName}.${stamp}.before`);
+  fs.writeFileSync(tempPath, beforeText || "", "utf8");
+  return tempPath;
+}
+
+async function showDiffPreview(filePath, beforeText, label) {
+  const workspaceFolder = getWorkspaceFolder();
+  const baselinePath = writeDiffBaselineFile(workspaceFolder, filePath, beforeText);
+  const beforeUri = vscode.Uri.file(baselinePath);
+  const afterUri = vscode.Uri.file(filePath);
+  const title = label || `Changes: ${path.basename(filePath)}`;
+
   try {
-    const originalDoc = await vscode.workspace.openTextDocument(filePath);
-    const languageId = originalDoc.languageId || "plaintext";
-    const beforeDoc = await vscode.workspace.openTextDocument({ content: beforeText || "", language: languageId });
-    const afterDoc = await vscode.workspace.openTextDocument({ content: afterText || "", language: languageId });
-    const title = label || `Changes: ${path.basename(filePath)}`;
-    await vscode.commands.executeCommand("vscode.diff", beforeDoc.uri, afterDoc.uri, title, { preview: true });
-    scheduleDiffAutoClose(beforeDoc.uri, afterDoc.uri, 2000);
+    const afterDoc = await vscode.workspace.openTextDocument(afterUri);
+    if (afterDoc.isDirty) {
+      await afterDoc.save();
+    }
+
+    // Open the real file first as a permanent (non-preview) tab so it is
+    // already sitting in the editor group. The diff overlay will display on
+    // top; when the diff tab is closed the file tab is already there.
+    await vscode.window.showTextDocument(afterDoc, {
+      preview: false,
+      preserveFocus: true,
+      viewColumn: vscode.ViewColumn.Active
+    });
+
+    // Open the diff in preview-mode so it reuses the same tab slot without
+    // creating an extra permanent tab.
+    await vscode.commands.executeCommand("vscode.diff", beforeUri, afterUri, title, { preview: true });
+
+    // Close the diff tab after 2 s, then clean up the baseline file.
+    scheduleDiffAutoClose(beforeUri, afterUri, 2000);
+    setTimeout(() => {
+      try {
+        fs.unlinkSync(baselinePath);
+      } catch (error) {
+        // Ignore cleanup failures.
+      }
+    }, 2200);
   } catch (error) {
-    // Ignore diff preview failures.
+    // If diff preview fails, still open/save the edited file to avoid losing context.
+    try {
+      const afterDoc = await vscode.workspace.openTextDocument(afterUri);
+      if (afterDoc.isDirty) {
+        await afterDoc.save();
+      }
+      await vscode.window.showTextDocument(afterDoc, {
+        preview: false,
+        preserveFocus: false,
+        viewColumn: vscode.ViewColumn.Active
+      });
+    } catch (openError) {
+      // Ignore fallback open failures.
+    }
+    try {
+      fs.unlinkSync(baselinePath);
+    } catch (cleanupError) {
+      // Ignore cleanup failures.
+    }
   }
 }
 
-const sharedCommandTerminal = {
-  terminal: null,
-  running: Promise.resolve(),
-  disposeListener: null,
+const commandSessionStore = {
+  sessions: new Map(),
+  terminalToSession: new Map(),
   dataListener: null,
-  cwd: "",
-  pending: null
+  closeListener: null,
+  counter: 0
 };
 
-function ensureCommandTerminal(shellPath) {
-  if (sharedCommandTerminal.terminal) {
-    return sharedCommandTerminal;
-  }
-
-  const options = { name: "Sarvam: Interactive" };
+function resolvePreferredShell(shellPath) {
   if (shellPath) {
-    options.shellPath = shellPath;
+    return shellPath;
   }
-  sharedCommandTerminal.terminal = vscode.window.createTerminal(options);
-  if (!sharedCommandTerminal.dataListener) {
-    sharedCommandTerminal.dataListener = vscode.window.onDidWriteTerminalData((event) => {
-      if (event.terminal !== sharedCommandTerminal.terminal) {
+  if (vscode.env.shell) {
+    return vscode.env.shell;
+  }
+  return process.platform === "win32" ? "powershell.exe" : "/bin/bash";
+}
+
+function appendSessionTranscript(session, chunk) {
+  session.transcript += chunk;
+  session.lastUpdatedAt = new Date().toISOString();
+  const maxChars = 200000;
+  if (session.transcript.length > maxChars) {
+    session.transcript = session.transcript.slice(session.transcript.length - maxChars);
+  }
+}
+
+function sanitizeTerminalOutput(value) {
+  if (!value) {
+    return "";
+  }
+  const source = String(value);
+  const cleaned = source
+    // OSC sequences (e.g. VS Code shell integration: ESC ] ... BEL / ST)
+    .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, "")
+    // CSI sequences (colors, cursor controls)
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
+    // Other single-character ESC sequences
+    .replace(/\x1B[@-Z\\-_]/g, "");
+  // Remove VS Code shell integration markers/prompts that may appear as plain text
+  const filteredLines = cleaned
+    .split(/\r?\n/)
+    .filter((line) => {
+      const text = String(line || "").trim();
+      if (!text) {
+        return true;
+      }
+      if (/__SARVAM_/i.test(text)) {
+        return false;
+      }
+      if (/\]633;|Cwd=|Write-Output\s+"__SARVAM_/i.test(text)) {
+        return false;
+      }
+      if (/^PS\s+.*>\s*(?:$|java\s+-version|javac\s+-version|echo\s+"---")/i.test(text)) {
+        return false;
+      }
+      return true;
+    });
+  return filteredLines.join("\n");
+}
+
+function tailSessionTranscript(session, maxChars = 6000) {
+  if (!session || !session.transcript) {
+    return "(no output yet)";
+  }
+  const limit = Number.isFinite(maxChars) && maxChars > 0 ? Math.floor(maxChars) : 6000;
+  const cleaned = sanitizeTerminalOutput(session.transcript);
+  return cleaned.length > limit
+    ? `...\n${cleaned.slice(cleaned.length - limit)}`
+    : cleaned;
+}
+
+function buildShellEchoCommand(shellName, markerText) {
+  const safe = String(markerText || "").replace(/\"/g, '\\\"');
+  if (shellName.includes("powershell") || shellName.includes("pwsh")) {
+    return `Write-Output \"${safe}\"`;
+  }
+  return `echo ${markerText}`;
+}
+
+function ensureCommandSessionListeners() {
+  if (!commandSessionStore.dataListener) {
+    commandSessionStore.dataListener = vscode.window.onDidWriteTerminalData((event) => {
+      const sessionId = commandSessionStore.terminalToSession.get(event.terminal);
+      if (!sessionId) {
+        return;
+      }
+      const session = commandSessionStore.sessions.get(sessionId);
+      if (!session) {
         return;
       }
       const chunk = String(event.data || "");
-      if (sharedCommandTerminal.pending) {
-        sharedCommandTerminal.pending.collected += chunk;
-        if (sharedCommandTerminal.pending.collected.includes(sharedCommandTerminal.pending.endMarker)) {
-          const collected = sharedCommandTerminal.pending.collected;
-          const startIndex = collected.indexOf(sharedCommandTerminal.pending.startMarker);
-          const endIndex = collected.indexOf(sharedCommandTerminal.pending.endMarker);
-          const extracted = startIndex >= 0 && endIndex > startIndex
-            ? collected.slice(startIndex + sharedCommandTerminal.pending.startMarker.length, endIndex)
-            : collected;
-          const resultText = extracted
-            .replace(sharedCommandTerminal.pending.startMarker, "")
-            .replace(sharedCommandTerminal.pending.endMarker, "")
-            .trim();
-          const resolver = sharedCommandTerminal.pending.resolve;
-          sharedCommandTerminal.pending = null;
-          resolver(resultText || "(no output)");
+      appendSessionTranscript(session, chunk);
+      if (!session.pending) {
+        return;
+      }
+      session.pending.collected += chunk;
+      if (!session.pending.collected.includes(session.pending.endMarker)) {
+        return;
+      }
+
+      const collected = session.pending.collected;
+      const startIndex = collected.indexOf(session.pending.startMarker);
+      const endIndex = collected.indexOf(session.pending.endMarker);
+      const extracted = startIndex >= 0 && endIndex > startIndex
+        ? collected.slice(startIndex + session.pending.startMarker.length, endIndex)
+        : collected;
+      const resultText = extracted
+        .replace(session.pending.startMarker, "")
+        .replace(session.pending.endMarker, "")
+        .trim();
+
+      const resolver = session.pending.resolve;
+      if (session.pending.timeoutHandle) {
+        clearTimeout(session.pending.timeoutHandle);
+      }
+      session.pending = null;
+      resolver({
+        status: "completed",
+        output: resultText || "(no output)",
+        sessionId: session.id
+      });
+    });
+  }
+
+  if (!commandSessionStore.closeListener) {
+    commandSessionStore.closeListener = vscode.window.onDidCloseTerminal((closed) => {
+      const sessionId = commandSessionStore.terminalToSession.get(closed);
+      if (!sessionId) {
+        return;
+      }
+      const session = commandSessionStore.sessions.get(sessionId);
+      if (session && session.pending) {
+        const resolver = session.pending.resolve;
+        if (session.pending.timeoutHandle) {
+          clearTimeout(session.pending.timeoutHandle);
         }
+        session.pending = null;
+        resolver({
+          status: "closed",
+          output: "Terminal was closed before command completion.",
+          sessionId: session.id
+        });
       }
+      commandSessionStore.terminalToSession.delete(closed);
+      commandSessionStore.sessions.delete(sessionId);
     });
   }
-  if (!sharedCommandTerminal.disposeListener) {
-    sharedCommandTerminal.disposeListener = vscode.window.onDidCloseTerminal((closed) => {
-      if (closed === sharedCommandTerminal.terminal) {
-        sharedCommandTerminal.terminal = null;
-        sharedCommandTerminal.running = Promise.resolve();
-        sharedCommandTerminal.cwd = "";
-        sharedCommandTerminal.pending = null;
-      }
-    });
-  }
-  return sharedCommandTerminal;
 }
 
-function runExecuteCommandInTerminal(command, workspaceFolder, shellPath, cwd) {
-  const terminalState = ensureCommandTerminal(shellPath);
-  // Always focus the terminal when sending a command
-  terminalState.terminal.show(true);
-  const normalizedCommand = normalizeShellCommand(command, shellPath);
-  const displayCwd = cwd || workspaceFolder;
-  const shellName = String(shellPath || "").toLowerCase();
-  terminalState.running = terminalState.running.then(() => new Promise((resolve, reject) => {
-    const runWithShell = () => {
-      const marker = `__SARVAM_${Date.now()}__`;
-      const startMarker = `${marker}_START`;
-      const endMarker = `${marker}_END`;
-      terminalState.pending = {
-        startMarker,
-        endMarker,
-        resolve,
-        reject,
-        collected: ""
-      };
-      if (terminalState.cwd !== displayCwd) {
-        const cdCommand = buildShellCdCommand(shellName, displayCwd);
-        if (cdCommand) {
-          terminalState.terminal.sendText(cdCommand, true);
-        }
-        terminalState.cwd = displayCwd;
-      }
-      terminalState.terminal.sendText(`echo ${startMarker}`, true);
-      terminalState.terminal.sendText(normalizedCommand, true);
-      terminalState.terminal.sendText(`echo ${endMarker}`, true);
+function createCommandSession({ shellPath, cwd }) {
+  ensureCommandSessionListeners();
+  const resolvedShell = resolvePreferredShell(shellPath);
+  commandSessionStore.counter += 1;
+  const id = `s${Date.now().toString(36)}${commandSessionStore.counter.toString(36)}`;
+  const options = {
+    name: `Sarvam: Shell ${id}`,
+    cwd: cwd || undefined
+  };
+  if (resolvedShell) {
+    options.shellPath = resolvedShell;
+  }
+  const terminal = vscode.window.createTerminal(options);
+  const session = {
+    id,
+    terminal,
+    shellPath: resolvedShell,
+    cwd: cwd || "",
+    transcript: "",
+    createdAt: new Date().toISOString(),
+    lastUpdatedAt: new Date().toISOString(),
+    running: Promise.resolve(),
+    pending: null,
+    lastCommand: ""
+  };
+  commandSessionStore.sessions.set(id, session);
+  commandSessionStore.terminalToSession.set(terminal, id);
+  return session;
+}
+
+function getCommandSession(sessionId) {
+  if (!sessionId) {
+    return null;
+  }
+  return commandSessionStore.sessions.get(String(sessionId).trim()) || null;
+}
+
+function closeCommandSession(sessionId) {
+  const session = getCommandSession(sessionId);
+  if (!session) {
+    return { ok: false, message: `No active shell session found for '${sessionId}'.` };
+  }
+  const output = tailSessionTranscript(session, 8000);
+  commandSessionStore.sessions.delete(session.id);
+  commandSessionStore.terminalToSession.delete(session.terminal);
+  session.terminal.dispose();
+  return {
+    ok: true,
+    message: `Closed shell session ${session.id}.`,
+    output,
+    sessionId: session.id
+  };
+}
+
+function runExecuteCommandInTerminal({ command, shellPath, cwd, sessionId, waitForCompletion = true, timeoutMs = 15000, revealTerminal = true }) {
+  const activeSession = getCommandSession(sessionId) || createCommandSession({ shellPath, cwd });
+  if (cwd && activeSession.cwd !== cwd) {
+    const shellName = String(activeSession.shellPath || "").toLowerCase();
+    const cdCommand = buildShellCdCommand(shellName, cwd);
+    if (cdCommand) {
+      activeSession.terminal.sendText(cdCommand, true);
+    }
+    activeSession.cwd = cwd;
+  }
+
+  if (revealTerminal) {
+    activeSession.terminal.show(true);
+  }
+
+  const normalizedCommand = normalizeShellCommand(command, activeSession.shellPath);
+  const shellName = String(activeSession.shellPath || "").toLowerCase();
+  activeSession.lastCommand = normalizedCommand;
+
+  activeSession.running = activeSession.running.then(() => new Promise((resolve) => {
+    if (!waitForCompletion) {
+      activeSession.terminal.sendText(normalizedCommand, true);
+      resolve({
+        status: "running",
+        output: "Command started in interactive shell.",
+        sessionId: activeSession.id
+      });
+      return;
+    }
+
+    const marker = `__SARVAM_${Date.now()}_${Math.random().toString(16).slice(2, 7)}__`;
+    const startMarker = `${marker}_START`;
+    const endMarker = `${marker}_END`;
+    const pending = {
+      startMarker,
+      endMarker,
+      resolve,
+      collected: "",
+      timeoutHandle: null
     };
-    runWithShell();
+
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      pending.timeoutHandle = setTimeout(() => {
+        if (!activeSession.pending || activeSession.pending !== pending) {
+          return;
+        }
+        activeSession.pending = null;
+        resolve({
+          status: "running",
+          output: tailSessionTranscript(activeSession, 4000),
+          sessionId: activeSession.id
+        });
+      }, timeoutMs);
+    }
+
+    activeSession.pending = pending;
+    activeSession.terminal.sendText(buildShellEchoCommand(shellName, startMarker), true);
+    activeSession.terminal.sendText(normalizedCommand, true);
+    activeSession.terminal.sendText(buildShellEchoCommand(shellName, endMarker), true);
   }));
 
-  return terminalState.running;
+  return activeSession.running.then((result) => ({
+    ...result,
+    shellPath: activeSession.shellPath,
+    cwd: activeSession.cwd || cwd || "",
+    command: normalizedCommand
+  }));
 }
 
 function runExecuteCommandInProcess(command, workspaceFolder, shellPath, cwd) {
@@ -902,6 +1535,31 @@ function parseTodoItems(raw) {
 function parseTodoArgs(args) {
   const raw = args && args.todos ? args.todos.join("\n") : "";
   return parseTodoItems(raw);
+}
+
+function parseBooleanArg(args, key, defaultValue = false) {
+  if (!args || !Array.isArray(args[key]) || !args[key].length) {
+    return defaultValue;
+  }
+  const raw = String(args[key][0]).trim().toLowerCase();
+  if (!raw) {
+    return defaultValue;
+  }
+  if (["true", "1", "yes", "y", "on"].includes(raw)) {
+    return true;
+  }
+  if (["false", "0", "no", "n", "off"].includes(raw)) {
+    return false;
+  }
+  return defaultValue;
+}
+
+function parseNumberArg(args, key, defaultValue) {
+  if (!args || !Array.isArray(args[key]) || !args[key].length) {
+    return defaultValue;
+  }
+  const parsed = Number(String(args[key][0]).trim());
+  return Number.isFinite(parsed) ? parsed : defaultValue;
 }
 
 function getToolDefinitions() {
@@ -1027,7 +1685,14 @@ function getToolDefinitions() {
         parameters: {
           type: "object",
           properties: {
-            command: { type: "string", description: "Command to run." }
+            command: { type: "string", description: "Command to run." },
+            cwd: { type: "string", description: "Optional working directory (if allowed by settings)." },
+            session_id: { type: "string", description: "Optional shell session id to reuse." },
+            wait_for_completion: { type: "boolean", description: "Wait until command completes. If false, return immediately and keep session interactive." },
+            timeout_ms: { type: "number", description: "Max wait time when wait_for_completion is true. If exceeded, returns current output and keeps command/session running." },
+            reveal_terminal: { type: "boolean", description: "Bring terminal to foreground while running command." },
+            read_output: { type: "boolean", description: "If true, ignore command and read the latest output from session_id." },
+            close_session: { type: "boolean", description: "If true, close session_id and return final transcript tail." }
           }
         }
       }
@@ -1049,32 +1714,39 @@ function getToolDefinitions() {
 }
 
 function listCheckpointFiles(workspaceFolder) {
-  const fs = require("fs");
-  const root = path.join(workspaceFolder, ".sarvam", "checkpoints");
+  const root = getCheckpointRoot(workspaceFolder);
   if (!fs.existsSync(root)) {
     return [];
   }
-  return fs.readdirSync(root).map((file) => path.join(root, file));
+  return fs
+    .readdirSync(root)
+    .filter((file) => file.toLowerCase().endsWith(".json"))
+    .map((file) => path.join(root, file));
 }
 
 function readCheckpointFile(filePath) {
-  const fs = require("fs");
   const raw = fs.readFileSync(filePath, "utf8");
   return JSON.parse(raw);
 }
 
 function resolveAutoApprove(toolName, autoApprove) {
+  const normalizedToolName = String(toolName || "").trim().toLowerCase();
+  const alwaysApprovedTools = new Set(["list_files", "list_code_definition_names", "search_files"]);
+  if (alwaysApprovedTools.has(normalizedToolName)) {
+    return true;
+  }
+  const readTools = new Set(["read_file"]);
   const writeTools = new Set(["write_to_file", "apply_diff", "search_and_replace", "insert_content"]);
-  if (toolName === "read_file") {
-    return false;
+  if (readTools.has(normalizedToolName)) {
+    return Boolean(autoApprove && autoApprove.read);
   }
-  if (writeTools.has(toolName)) {
-    return false;
+  if (writeTools.has(normalizedToolName)) {
+    return Boolean(autoApprove && autoApprove.write);
   }
-  if (toolName === "execute_command") {
-    return false;
+  if (normalizedToolName === "execute_command") {
+    return Boolean(autoApprove && autoApprove.execute);
   }
-  return Boolean(autoApprove && autoApprove.other);
+  return true;
 }
 
 class SarvamViewProvider {
@@ -1089,8 +1761,167 @@ class SarvamViewProvider {
     this.pendingFollowupChoice = null;
     this.lastFollowupChoice = null;
     this.processing = false;
+    this.abortController = null;
+    this.stopRequested = false;
     this.webview = null;
     this.settings = null;
+    this.autoApprove = getDefaultAutoApproveConfig();
+    this.taskShellSessions = new Map();
+  }
+
+  async generateTaskTitleFromHistory({ settings, activeTask, send, workspaceFolder, requestId, logEvent }) {
+    if (!settings || !activeTask) {
+      return;
+    }
+    const titlePrompt = "You have the complete message history after attempt_completion tool is invoked. Can you provide a title using title_name tool? Respond with exactly one valid tool call: <title_name><value>...</value></title_name>. Use a concise 3-7 word title. No prose.";
+    const titleMessages = [
+      ...buildModelMessages(this.systemPrompt, this.history),
+      { role: "system", content: titlePrompt }
+    ];
+    const titlePayloadSummary = {
+      model: settings.model,
+      messageCount: titleMessages.length,
+      messages: summarizeMessages(titleMessages, 6)
+    };
+    const rawTitleRequest = JSON.stringify({ model: settings.model, messages: titleMessages }, null, 2);
+    logEvent({
+      level: "info",
+      phase: "response",
+      message: "Title request payload",
+      detail: truncateText(JSON.stringify(titlePayloadSummary), 900),
+      rawRequest: rawTitleRequest,
+      taskId: this.currentTaskId,
+      requestId
+    });
+    let titleResponse = "";
+    try {
+      const titleResult = await streamChatCompletions({
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
+        model: settings.model,
+        messages: titleMessages,
+        signal: null,
+        onDelta: (delta) => {
+          titleResponse += delta;
+        }
+      });
+      if (titleResult && typeof titleResult.assistantText === "string") {
+        titleResponse = titleResult.assistantText;
+      }
+      logEvent({
+        level: "info",
+        phase: "response",
+        message: "Title response received",
+        rawResponse: titleResponse || "",
+        finalResponse: stripToolXml(titleResponse || ""),
+        taskId: this.currentTaskId,
+        requestId
+      });
+    } catch (error) {
+      logEvent({
+        level: "warn",
+        phase: "response",
+        message: "Skipped auto title update",
+        detail: error && error.message ? error.message : "Title generation failed",
+        taskId: this.currentTaskId,
+        requestId
+      });
+      return;
+    }
+
+    const titleCall = extractToolCall(titleResponse || "");
+    let titleValue = "";
+    if (titleCall && titleCall.name === "title_name") {
+      titleValue = (
+        (titleCall.args.value && titleCall.args.value[0]) ||
+        (titleCall.args.title && titleCall.args.title[0]) ||
+        (titleCall.args.name && titleCall.args.name[0]) ||
+        ""
+      );
+    }
+    if (!titleValue) {
+      const titleMatch = String(titleResponse || "").match(/<title_name>[\s\S]*?<value>([\s\S]*?)<\/value>[\s\S]*?<\/title_name>/i);
+      if (titleMatch && titleMatch[1]) {
+        titleValue = titleMatch[1];
+      }
+    }
+    if (!titleValue) {
+      const looseValueMatch = String(titleResponse || "").match(/<value>([\s\S]*?)<\/value>/i);
+      if (looseValueMatch && looseValueMatch[1]) {
+        titleValue = looseValueMatch[1];
+      }
+    }
+    if (!titleValue) {
+      // Fallback: model emitted <title_name>TEXT</title_name> without a <value> wrapper
+      const directContentMatch = String(titleResponse || "").match(/<title_name[^>]*>([\s\S]*?)<\/title_name>/i);
+      if (directContentMatch && directContentMatch[1]) {
+        const inner = directContentMatch[1].trim();
+        // Only use if it doesn't look like more XML (i.e., not a nested tag block)
+        if (inner && !inner.startsWith("<")) {
+          titleValue = inner;
+        }
+      }
+    }
+    if (!titleValue) {
+      // Fallback: accept plain text response and derive a concise title.
+      titleValue = stripToolXml(String(titleResponse || ""))
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean) || "";
+    }
+
+    const normalizedTitle = String(titleValue || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80);
+
+    const compactTitle = normalizedTitle
+      .split(" ")
+      .slice(0, 7)
+      .join(" ")
+      .trim();
+
+    const finalTitle = compactTitle || normalizedTitle;
+
+    if (!finalTitle || finalTitle === activeTask.title) {
+      logEvent({
+        level: "info",
+        phase: "response",
+        message: "Task title unchanged",
+        detail: "Title generation returned empty or same title",
+        taskId: this.currentTaskId,
+        requestId
+      });
+      return;
+    }
+
+    activeTask.title = finalTitle;
+    saveSarvamState(workspaceFolder, {
+      settings: this.settings,
+      tasks: this.tasks,
+      currentTaskId: this.currentTaskId
+    });
+    send({
+      type: "tasks",
+      value: {
+        tasks: this.tasks.map(({ id, title, metrics, history, checkpoints }) => ({
+          id,
+          title,
+          metrics,
+          preview: history && history.length ? (history[0].display || history[0].content) : "",
+          checkpoints: checkpoints || []
+        })),
+        currentTaskId: this.currentTaskId
+      }
+    });
+    logEvent({
+      level: "info",
+      phase: "response",
+      message: "Task title updated",
+      detail: finalTitle,
+      taskId: this.currentTaskId,
+      requestId
+    });
   }
 
   resolveWebviewView(webviewView) {
@@ -1124,6 +1955,7 @@ class SarvamViewProvider {
       ? persisted.tasks.map((task) => ({
         ...task,
         history: Array.isArray(task.history) ? task.history.map(normalizeHistoryEntry) : [],
+        checkpoints: Array.isArray(task.checkpoints) ? task.checkpoints : [],
         eventLog: Array.isArray(task.eventLog) ? task.eventLog : []
       }))
       : [];
@@ -1165,9 +1997,11 @@ class SarvamViewProvider {
       getWorkspaceFolder(),
       vscode.env.shell
     );
+    this.autoApprove = getDefaultAutoApproveConfig();
+
     webviewView.webview.postMessage({
       type: "autoApprove",
-      value: getAutoApproveConfig()
+      value: this.autoApprove
     });
     webviewView.webview.postMessage({
       type: "history",
@@ -1194,7 +2028,8 @@ class SarvamViewProvider {
     this.context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration("sarvamCoder.autoApprove")) {
-          send({ type: "autoApprove", value: getAutoApproveConfig() });
+          this.autoApprove = getDefaultAutoApproveConfig();
+          send({ type: "autoApprove", value: this.autoApprove });
         }
       })
     );
@@ -1238,6 +2073,7 @@ class SarvamViewProvider {
       }
 
       this.pendingToolDecision = null;
+      this.lastToolDecision = null;
       this.pendingFollowupChoice = null;
       this.lastFollowupChoice = null;
 
@@ -1247,49 +2083,57 @@ class SarvamViewProvider {
         return;
       }
 
-      if (this.history.length === 0) {
-        writeInitialCheckpoint(getWorkspaceFolder(), {
-          timestamp: new Date().toISOString(),
-          systemPrompt: this.systemPrompt,
-          userMessage: userContent,
-          taskId: this.currentTaskId
-        });
-      }
-
       this.processing = true;
+  this.stopRequested = false;
       const requestId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
-      send({ type: "toolRequestClear" });
-      logEvent({
-        level: "info",
-        phase: "request",
-        message: "Request started",
-        detail: `Prompt: ${truncateText(userContent, 220)}`,
-        taskId: this.currentTaskId,
-        requestId
-      });
-      this.history.push(createHistoryEntry("user", userContent, userContent, userContent));
-      const activeTask = this.tasks.find((task) => task.id === this.currentTaskId);
-      if (activeTask) {
-        activeTask.history = this.history;
-      }
-      saveSarvamState(workspaceFolder, {
-        settings: this.settings,
-        tasks: this.tasks,
-        currentTaskId: this.currentTaskId
-      });
+      try {
+        send({ type: "requestState", value: { running: true } });
+        send({ type: "toolRequestClear" });
+        logEvent({
+          level: "info",
+          phase: "request",
+          message: "Request started",
+          detail: `Prompt: ${truncateText(userContent, 220)}`,
+          taskId: this.currentTaskId,
+          requestId
+        });
+        this.history.push(createHistoryEntry("user", userContent, userContent, userContent));
+        const activeTask = this.tasks.find((task) => task.id === this.currentTaskId);
+        if (activeTask) {
+          activeTask.history = this.history;
+        }
+        saveSarvamState(workspaceFolder, {
+          settings: this.settings,
+          tasks: this.tasks,
+          currentTaskId: this.currentTaskId
+        });
 
-      let loopGuard = 0;
-      const maxLoops = 8;
-      const repeatConfig = vscode.workspace.getConfiguration("sarvamCoder");
-      const configuredMaxRepeat = Number(repeatConfig.get("tool.maxRepeat", 0)) || 0;
-      const maxRepeat = Math.max(0, Math.floor(configuredMaxRepeat));
-      let lastToolSignature = null;
-      let repeatCount = 0;
-      let finalAttempted = false;
-      let finalDelivered = false;
-      let messages = buildModelMessages(this.systemPrompt, this.history);
+        let loopGuard = 0;
+        const maxLoops = 8;
+        const repeatConfig = vscode.workspace.getConfiguration("sarvamCoder");
+        const configuredMaxRepeat = Number(repeatConfig.get("tool.maxRepeat", 0)) || 0;
+        const maxRepeat = Math.max(0, Math.floor(configuredMaxRepeat));
+        let lastToolSignature = null;
+        let repeatCount = 0;
+        let finalAttempted = false;
+        let finalDelivered = false;
+        let noToolRetryStage = 0;
+        let repeatedWritePath = "";
+        let repeatedWriteCount = 0;
+        let didMutatingToolRun = false;
+        let didApplyDiffRun = false;
+        let didAnyToolRun = false;
+        const explicitApplyDiffRequested = (() => {
+          const raw = String(userContent || "");
+          if (!/\bapply_diff\b/i.test(raw)) return false;
+          // Exclude when apply_diff is mentioned only in a negation context (e.g. "do not use apply_diff")
+          if (/\b(?:not|don'?t|no|without|avoid)\b[^.!?]*\bapply_diff\b/i.test(raw)) return false;
+          return true;
+        })();
+        const explicitEditRequested = /\b(update|modify|remove|replace|insert|edit|change|rewrite|fix)\b/i.test(String(userContent || ""));
+        let messages = buildModelMessages(this.systemPrompt, this.history);
 
-      while (loopGuard < maxLoops) {
+        while (loopGuard < maxLoops) {
         loopGuard += 1;
         let assistantText = "";
         let usage = null;
@@ -1315,29 +2159,63 @@ class SarvamViewProvider {
             apiKey: settings.apiKey,
             model: settings.model,
             messages,
+            signal: (this.abortController = new AbortController()).signal,
             onDelta: (delta) => {
               assistantText += delta;
               send({ type: "assistantDelta", value: delta });
             }
           });
+          this.abortController = null;
           assistantText = result.assistantText;
           usage = result.usage;
           const responseDetail = usage
             ? `Tokens in/out: ${usage.prompt_tokens ?? "?"}/${usage.completion_tokens ?? "?"}`
             : "";
-          const rawSnippet = assistantText || "";
+          const rawSnippet = result.rawResponse || assistantText || "";
           const displaySnippet = stripToolXml(assistantText);
+          const thinkingSnippet = (() => {
+            const m = String(assistantText || "").match(/<thinking>([\s\S]*?)<\/thinking>/i);
+            return m ? String(m[1]).trim() : "";
+          })();
+          const logFinalResponse = thinkingSnippet
+            ? `[Thinking]\n${thinkingSnippet}\n\n[Response]\n${displaySnippet}`
+            : displaySnippet;
           logEvent({
             level: "info",
             phase: "response",
             message: "Model response received",
             detail: responseDetail,
             rawResponse: rawSnippet,
-            finalResponse: displaySnippet,
+            finalResponse: logFinalResponse,
             taskId: this.currentTaskId,
             requestId
           });
         } catch (error) {
+          this.abortController = null;
+          if (error && error.name === "AbortError") {
+            if (assistantText && assistantText.trim()) {
+              const partial = stripToolXml(assistantText);
+              if (partial) {
+                const assistantMessage = createHistoryEntry("assistant", partial, assistantText, partial);
+                this.history.push(assistantMessage);
+                if (activeTask) {
+                  activeTask.history = this.history;
+                }
+                saveSarvamState(workspaceFolder, {
+                  settings: this.settings,
+                  tasks: this.tasks,
+                  currentTaskId: this.currentTaskId
+                });
+                send({ type: "assistantDone", value: { text: partial, raw: assistantText } });
+              }
+            }
+            const notice = this.stopRequested ? "Request stopped by user." : "Request aborted.";
+            if (!this.stopRequested) {
+              send({ type: "error", value: notice });
+            }
+            logEvent({ level: "warn", phase: "response", message: notice, taskId: this.currentTaskId, requestId });
+            break;
+          }
           const message = error.message || "Request failed.";
           this.history.push({ role: "error", content: message });
           if (activeTask) {
@@ -1355,7 +2233,10 @@ class SarvamViewProvider {
 
         const completionText = extractAttemptCompletion(assistantText);
         const displayText = completionText || stripToolXml(assistantText);
-        const toolCall = extractToolCall(assistantText);
+        const inlineTitleValue = extractInlineTitleValue(assistantText);
+        const assistantTextWithoutTitle = String(assistantText || "").replace(/<title_name>[\s\S]*?<\/title_name>/gi, " ");
+        const toolCall = extractToolCall(assistantTextWithoutTitle);
+        const toolCallCount = countToolCallTags(assistantText);
         const assistantMessage = createHistoryEntry("assistant", displayText, assistantText, displayText);
 
         const inputTokens = usage?.prompt_tokens ?? approximateTokens(messages.map((m) => m.content).join("\n"));
@@ -1375,6 +2256,33 @@ class SarvamViewProvider {
           currentTaskId: this.currentTaskId
         });
         send({ type: "metrics", value: metrics });
+        if (inlineTitleValue && activeTask) {
+          const normalizedTitle = String(inlineTitleValue)
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 80);
+          if (normalizedTitle && normalizedTitle !== activeTask.title) {
+            activeTask.title = normalizedTitle;
+            saveSarvamState(workspaceFolder, {
+              settings: this.settings,
+              tasks: this.tasks,
+              currentTaskId: this.currentTaskId
+            });
+            send({
+              type: "tasks",
+              value: {
+                tasks: this.tasks.map(({ id, title, metrics, history, checkpoints }) => ({
+                  id,
+                  title,
+                  metrics,
+                  preview: history && history.length ? (history[0].display || history[0].content) : "",
+                  checkpoints: checkpoints || []
+                })),
+                currentTaskId: this.currentTaskId
+              }
+            });
+          }
+        }
         send({
           type: "tasks",
           value: {
@@ -1389,22 +2297,75 @@ class SarvamViewProvider {
           }
         });
 
-        if (!toolCall) {
-          if (!displayText && !finalAttempted) {
-            finalAttempted = true;
-            const finalPrompt = "Provide the final response now using the tool results above. Do not call any tools.";
+        if (completionText) {
+          if (explicitApplyDiffRequested && !didApplyDiffRun) {
+            const promptMessage = "The user explicitly requested apply_diff. You must execute exactly one valid <apply_diff> tool call before final completion.";
             logEvent({
-              level: "info",
+              level: "warn",
               phase: "response",
-              message: "Retrying for final response",
+              message: "Blocked completion before apply_diff",
+              detail: "Completion attempted without apply_diff execution",
               taskId: this.currentTaskId,
               requestId
             });
-            messages = [...messages, { role: "user", content: finalPrompt }];
+            messages = [...buildModelMessages(this.systemPrompt, this.history), { role: "system", content: promptMessage }];
             loopGuard = 0;
             continue;
           }
-          if (displayText) {
+          if (explicitEditRequested && !didMutatingToolRun) {
+            const promptMessage = "The user requested a file edit. Execute exactly one valid mutating tool call (apply_diff, write_to_file, search_and_replace, or insert_content) before final completion.";
+            logEvent({
+              level: "warn",
+              phase: "response",
+              message: "Blocked completion before edit tool",
+              detail: "Completion attempted without mutating tool execution",
+              taskId: this.currentTaskId,
+              requestId
+            });
+            messages = [...buildModelMessages(this.systemPrompt, this.history), { role: "system", content: promptMessage }];
+            loopGuard = 0;
+            continue;
+          }
+          this.history.push(assistantMessage);
+          if (activeTask) {
+            activeTask.history = this.history;
+          }
+          saveSarvamState(workspaceFolder, {
+            settings: this.settings,
+            tasks: this.tasks,
+            currentTaskId: this.currentTaskId
+          });
+          send({ type: "assistantDone", value: { text: completionText, raw: assistantText } });
+          await this.generateTaskTitleFromHistory({
+            settings,
+            activeTask,
+            send,
+            workspaceFolder,
+            requestId,
+            logEvent
+          });
+          finalDelivered = true;
+          break;
+        }
+
+        if (toolCallCount > 1) {
+          logEvent({
+            level: "warn",
+            phase: "response",
+            message: "Model returned multiple tool calls in one response",
+            detail: `Detected ${toolCallCount} tool tags; requesting exactly one tool call`,
+            taskId: this.currentTaskId,
+            requestId
+          });
+          const multiToolPrompt = "You returned multiple tool calls in one message. Respond with exactly one valid tool call and no prose.";
+          messages = [...buildModelMessages(this.systemPrompt, this.history), { role: "system", content: multiToolPrompt }];
+          loopGuard = 0;
+          continue;
+        }
+
+        if (!toolCall) {
+          const shouldRecordNoToolResponse = finalAttempted;
+          if (displayText && shouldRecordNoToolResponse) {
             this.history.push(assistantMessage);
             if (activeTask) {
               activeTask.history = this.history;
@@ -1415,10 +2376,85 @@ class SarvamViewProvider {
               currentTaskId: this.currentTaskId
             });
             send({ type: "assistantDone", value: { text: displayText, raw: assistantText } });
-            finalDelivered = true;
           }
+
+          if (didAnyToolRun && !finalAttempted) {
+            finalAttempted = true;
+            const promptMessage = "You already executed the required tool(s). Provide the final response now using <attempt_completion><result>...</result></attempt_completion>. Do not call any more tools and do not include prose outside attempt_completion.";
+            logEvent({
+              level: "info",
+              phase: "response",
+              message: "Requesting attempt_completion after tool execution",
+              detail: truncateText(displayText || "(empty response)", 240),
+              taskId: this.currentTaskId,
+              requestId
+            });
+            messages = [...buildModelMessages(this.systemPrompt, this.history), { role: "system", content: promptMessage }];
+            loopGuard = 0;
+            continue;
+          }
+
+          if (noToolRetryStage === 0) {
+            const promptMessage = "You responded with no tools. Review the system prompt and conversation history, then respond with exactly one valid tool call and no prose.";
+            logEvent({
+              level: "warn",
+              phase: "response",
+              message: "Model responded with no tool",
+              detail: promptMessage,
+              taskId: this.currentTaskId,
+              requestId
+            });
+            const retryMessages = buildModelMessages(this.systemPrompt, this.history);
+            messages = [...retryMessages, { role: "system", content: promptMessage }];
+            noToolRetryStage = 1;
+            loopGuard = 0;
+            continue;
+          }
+
+          if (!finalAttempted) {
+            finalAttempted = true;
+            const completionPrompt = "You have enough context. Respond now with exactly one <attempt_completion><result>...</result></attempt_completion> and no tool calls.";
+            logEvent({
+              level: "warn",
+              phase: "response",
+              message: "Model responded with no tool after retries",
+              detail: "Requesting forced attempt_completion",
+              taskId: this.currentTaskId,
+              requestId
+            });
+            messages = [...buildModelMessages(this.systemPrompt, this.history), { role: "system", content: completionPrompt }];
+            loopGuard = 0;
+            continue;
+          }
+
+          const stopMessage = "[System Message] Model responded with no tools after retries and forced completion. Stopping.";
+          logEvent({
+            level: "warn",
+            phase: "response",
+            message: "Model responded with no tool after forced completion",
+            taskId: this.currentTaskId,
+            requestId
+          });
+          this.history.push(createHistoryEntry("tool-execution", stopMessage, stopMessage, stopMessage));
+          if (activeTask) {
+            activeTask.history = this.history;
+          }
+          saveSarvamState(workspaceFolder, {
+            settings: this.settings,
+            tasks: this.tasks,
+            currentTaskId: this.currentTaskId
+          });
+          send({
+            type: "historyAppend",
+            value: {
+              role: "tool-execution",
+              content: stopMessage,
+              raw: stopMessage
+            }
+          });
           break;
         }
+        noToolRetryStage = 0;
         if (toolCall.name === "tool_call") {
           this.history.push(assistantMessage);
           if (activeTask) {
@@ -1442,45 +2478,6 @@ class SarvamViewProvider {
           });
           break;
         }
-        if (toolCall.name === "title_name") {
-          this.history.push(assistantMessage);
-          if (activeTask) {
-            activeTask.history = this.history;
-          }
-          saveSarvamState(workspaceFolder, {
-            settings: this.settings,
-            tasks: this.tasks,
-            currentTaskId: this.currentTaskId
-          });
-          send({ type: "assistantDone", value: { text: displayText, raw: assistantText } });
-          const titleValue =
-            (toolCall.args.value && toolCall.args.value[0]) ||
-            (toolCall.args.title && toolCall.args.title[0]) ||
-            (toolCall.args.name && toolCall.args.name[0]);
-          if (activeTask && titleValue) {
-            activeTask.title = titleValue.trim();
-            saveSarvamState(workspaceFolder, {
-              settings: this.settings,
-              tasks: this.tasks,
-              currentTaskId: this.currentTaskId
-            });
-            send({
-              type: "tasks",
-              value: {
-                tasks: this.tasks.map(({ id, title, metrics, history, checkpoints }) => ({
-                  id,
-                  title,
-                  metrics,
-                  preview: history && history.length ? (history[0].display || history[0].content) : "",
-                  checkpoints: checkpoints || []
-                })),
-                currentTaskId: this.currentTaskId
-              }
-            });
-          }
-          break;
-        }
-
         if (toolCall.name === "ask_followup_question") {
           if (displayText) {
             this.history.push(assistantMessage);
@@ -1575,7 +2572,49 @@ class SarvamViewProvider {
 
         send({ type: "assistantDone", value: { text: displayText, raw: assistantText } });
 
-        const toolSignature = `${toolCall.name}:${JSON.stringify(toolCall.args || {})}`;
+        const mutatingTools = new Set(["write_to_file", "apply_diff", "search_and_replace", "insert_content"]);
+        if (mutatingTools.has(toolCall.name)) {
+          didMutatingToolRun = true;
+        }
+        if (toolCall.name === "apply_diff") {
+          didApplyDiffRun = true;
+        }
+
+        if (toolCall.name === "write_to_file") {
+          const currentWritePath = String((toolCall.args.path && toolCall.args.path[0]) || "").trim().toLowerCase();
+          if (currentWritePath && currentWritePath === repeatedWritePath) {
+            repeatedWriteCount += 1;
+          } else {
+            repeatedWritePath = currentWritePath;
+            repeatedWriteCount = 0;
+          }
+          if (repeatedWriteCount >= 1) {
+            const writeLoopNotice = `Detected repeated write_to_file calls on '${currentWritePath || "(unknown path)"}'.`;
+            logEvent({
+              level: "warn",
+              phase: "response",
+              message: "Repeated write_to_file detected",
+              detail: writeLoopNotice,
+              taskId: this.currentTaskId,
+              requestId
+            });
+            if (!finalAttempted) {
+              finalAttempted = true;
+              const finalPrompt = "You already updated this file multiple times. Stop calling write tools and provide the final response now using <attempt_completion>.";
+              messages = [...buildModelMessages(this.systemPrompt, this.history), { role: "system", content: finalPrompt }];
+              loopGuard = 0;
+              continue;
+            }
+            send({ type: "error", value: writeLoopNotice });
+            break;
+          }
+        } else {
+          repeatedWritePath = "";
+          repeatedWriteCount = 0;
+        }
+
+        const signatureArgs = normalizeArgsForSignature(toolCall.name, toolCall.args || {});
+        const toolSignature = `${toolCall.name}:${JSON.stringify(signatureArgs)}`;
         if (toolSignature === lastToolSignature) {
           repeatCount += 1;
         } else {
@@ -1607,9 +2646,10 @@ class SarvamViewProvider {
           break;
         }
 
-        const autoApprove = getAutoApproveConfig();
-        const shouldAutoApprove = resolveAutoApprove(toolCall.name, autoApprove);
+        const shouldAutoApprove = resolveAutoApprove(toolCall.name, this.autoApprove);
         if (!shouldAutoApprove) {
+          // Reset any stale buffered decision before showing a new approval prompt.
+          this.lastToolDecision = null;
           const toolSummary = summarizeToolRequest(toolCall);
           send({
             type: "toolRequest",
@@ -1640,6 +2680,11 @@ class SarvamViewProvider {
         } else {
           decision = await new Promise((resolve) => {
             this.pendingToolDecision = resolve;
+            if (this.lastToolDecision) {
+              const value = this.lastToolDecision;
+              this.lastToolDecision = null;
+              resolve(value);
+            }
           });
         }
 
@@ -1673,6 +2718,62 @@ class SarvamViewProvider {
 
         let toolResult = "";
         let preWriteExists = false;
+        let checkpointRecord = null;
+        const normalizedToolName = String(toolCall.name || "").trim().toLowerCase();
+        if (normalizedToolName === "title_name") {
+          const titleValue =
+            (toolCall.args.value && toolCall.args.value[0]) ||
+            (toolCall.args.title && toolCall.args.title[0]) ||
+            (toolCall.args.name && toolCall.args.name[0]) ||
+            inlineTitleValue ||
+            "";
+          const normalizedTitle = String(titleValue)
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 80);
+          if (activeTask && normalizedTitle && normalizedTitle !== activeTask.title) {
+            activeTask.title = normalizedTitle;
+            saveSarvamState(workspaceFolder, {
+              settings: this.settings,
+              tasks: this.tasks,
+              currentTaskId: this.currentTaskId
+            });
+            send({
+              type: "tasks",
+              value: {
+                tasks: this.tasks.map(({ id, title, metrics, history, checkpoints }) => ({
+                  id,
+                  title,
+                  metrics,
+                  preview: history && history.length ? (history[0].display || history[0].content) : "",
+                  checkpoints: checkpoints || []
+                })),
+                currentTaskId: this.currentTaskId
+              }
+            });
+          }
+          continue;
+        }
+        if (normalizedToolName === "attempt_completion") {
+          // Model emitted attempt_completion as a tool call instead of using the
+          // <attempt_completion> wrapper. Extract the result text and deliver it.
+          const resultText = (toolCall.args.result && toolCall.args.result[0]) ||
+            (toolCall.args.content && toolCall.args.content[0]) ||
+            displayText ||
+            "";
+          this.history.push(assistantMessage);
+          if (activeTask) {
+            activeTask.history = this.history;
+          }
+          saveSarvamState(workspaceFolder, {
+            settings: this.settings,
+            tasks: this.tasks,
+            currentTaskId: this.currentTaskId
+          });
+          send({ type: "assistantDone", value: { text: resultText || displayText, raw: assistantText } });
+          finalDelivered = true;
+          break;
+        }
         try {
           send({ type: "toolRequestClear" });
           logEvent({
@@ -1684,41 +2785,226 @@ class SarvamViewProvider {
             requestId
           });
           const writeTools = new Set(["write_to_file", "apply_diff", "search_and_replace", "insert_content"]);
-          const shouldPreviewDiff = writeTools.has(toolCall.name);
+          const executeCommandValue = String((toolCall.args.command && toolCall.args.command[0]) || "").trim();
+          const executeReadOutput = parseBooleanArg(toolCall.args, "read_output", false);
+          const executeCloseSession = parseBooleanArg(toolCall.args, "close_session", false);
+          const executeWillRunCommand = normalizedToolName === "execute_command"
+            && !executeReadOutput
+            && !executeCloseSession
+            && Boolean(executeCommandValue);
+          let shouldPreviewDiff = writeTools.has(normalizedToolName) || executeWillRunCommand;
           let previewPath = "";
           let beforeSnapshot = "";
-          if (shouldPreviewDiff) {
+          if (normalizedToolName === "write_to_file") {
             previewPath = String((toolCall.args.path && toolCall.args.path[0]) || "").trim();
             if (previewPath) {
               const absolutePath = ensureWorkspacePath(getWorkspaceFolder(), previewPath);
               beforeSnapshot = readFileSafe(absolutePath);
               preWriteExists = fs.existsSync(absolutePath);
+              const nextContent = String((toolCall.args.content && toolCall.args.content[0]) || "");
+              if (beforeSnapshot === nextContent) {
+                shouldPreviewDiff = false;
+              }
             }
           }
-          if (writeTools.has(toolCall.name)) {
-            createCheckpoint(getWorkspaceFolder(), {
-              timestamp: new Date().toISOString(),
-              taskId: this.currentTaskId,
-              toolCall: toolCall.raw
-            }, "pre-write");
+          if (shouldPreviewDiff) {
+            if (normalizedToolName === "execute_command") {
+              // For execute_command, create git stash if in git repo
+              if (isGitRepository(getWorkspaceFolder())) {
+                const gitStash = await createGitStash(getWorkspaceFolder(), this.currentTaskId, toolCall.name);
+                if (gitStash && gitStash.stashLabel) {
+                  const stashId = await getLatestGitStashId(getWorkspaceFolder());
+                  checkpointRecord = createRestoreCheckpoint(getWorkspaceFolder(), {
+                    taskId: this.currentTaskId,
+                    toolName: toolCall.name,
+                    checkpointType: "git",
+                    gitStashId: stashId,
+                    toolCall: toolCall.raw,
+                    files: []
+                  });
+                }
+              }
+              // If not in git repo or git stash failed, fall back to full workspace snapshot
+              if (!checkpointRecord) {
+                const workspaceFiles = [];
+                const root = getWorkspaceFolder();
+                const ignorePatterns = [".git", ".sarvam", "node_modules", "dist", "build", ".next", ".venv", "venv"];
+                const shouldIgnore = (filePath) => {
+                  const relative = path.relative(root, filePath).split(path.sep);
+                  return relative.some((part) => ignorePatterns.includes(part));
+                };
+                const walkFiles = (dir) => {
+                  if (!fs.existsSync(dir)) return;
+                  try {
+                    const entries = fs.readdirSync(dir);
+                    entries.forEach((entry) => {
+                      const fullPath = path.join(dir, entry);
+                      if (shouldIgnore(fullPath)) return;
+                      try {
+                        const stat = fs.statSync(fullPath);
+                        if (stat.isFile() && stat.size < 5 * 1024 * 1024) {
+                          const content = fs.readFileSync(fullPath, "utf8");
+                          workspaceFiles.push({
+                            path: path.relative(root, fullPath),
+                            existedBefore: true,
+                            content
+                          });
+                        } else if (stat.isDirectory()) {
+                          walkFiles(fullPath);
+                        }
+                      } catch (error) {
+                        // Skip unreadable files
+                      }
+                    });
+                  } catch (error) {
+                    // Skip unreadable directories
+                  }
+                };
+                walkFiles(root);
+                checkpointRecord = createRestoreCheckpoint(getWorkspaceFolder(), {
+                  taskId: this.currentTaskId,
+                  toolName: toolCall.name,
+                  checkpointType: "snapshot",
+                  toolCall: toolCall.raw,
+                  files: workspaceFiles
+                });
+              }
+            } else {
+              // For write tools, snapshot specific file
+              previewPath = String((toolCall.args.path && toolCall.args.path[0]) || "").trim();
+              if (!previewPath && toolCall.raw) {
+                const pathMatch = String(toolCall.raw).match(/<path>([\s\S]*?)<\/path>/i);
+                previewPath = pathMatch && pathMatch[1] ? String(pathMatch[1]).trim() : "";
+              }
+              if (previewPath) {
+                const absolutePath = ensureWorkspacePath(getWorkspaceFolder(), previewPath);
+                beforeSnapshot = readFileSafe(absolutePath);
+                preWriteExists = fs.existsSync(absolutePath);
+                checkpointRecord = createRestoreCheckpoint(getWorkspaceFolder(), {
+                  taskId: this.currentTaskId,
+                  toolName: toolCall.name,
+                  targetPath: previewPath,
+                  toolCall: toolCall.raw,
+                  files: [{
+                    path: previewPath,
+                    existedBefore: preWriteExists,
+                    content: preWriteExists ? beforeSnapshot : ""
+                  }]
+                });
+              }
+            }
+            if (checkpointRecord) {
+              if (activeTask) {
+                if (!Array.isArray(activeTask.checkpoints)) {
+                  activeTask.checkpoints = [];
+                }
+                activeTask.checkpoints.unshift(checkpointRecord);
+              }
+              const checkpointDisplay = "Checkpoint created";
+              this.history.push(createHistoryEntry("tool-execution", checkpointDisplay, checkpointDisplay, checkpointDisplay, { checkpoint: checkpointRecord }));
+              if (activeTask && this.history.length > 0) {
+                activeTask.history = this.history;
+              }
+              saveSarvamState(workspaceFolder, {
+                settings: this.settings,
+                tasks: this.tasks,
+                currentTaskId: this.currentTaskId
+              });
+              send({
+                type: "tasks",
+                value: {
+                  tasks: this.tasks.map(({ id, title, metrics, history, checkpoints }) => ({
+                    id,
+                    title,
+                    metrics,
+                    preview: history && history.length ? (history[0].display || history[0].content) : "",
+                    checkpoints: checkpoints || []
+                  })),
+                  currentTaskId: this.currentTaskId
+                }
+              });
+              send({
+                type: "historyAppend",
+                value: {
+                  role: "tool-execution",
+                  content: checkpointDisplay,
+                  raw: checkpointDisplay,
+                  checkpoint: checkpointRecord
+                }
+              });
+            }
           }
-          if (toolCall.name === "execute_command") {
+          if (normalizedToolName === "execute_command") {
             const commandValue = (toolCall.args.command && toolCall.args.command[0]) || "";
             const cwdValue = toolCall.args.cwd && toolCall.args.cwd[0] ? toolCall.args.cwd[0] : "";
-            if (!commandValue) {
+            const modelSessionId = toolCall.args.session_id && toolCall.args.session_id[0] ? String(toolCall.args.session_id[0]).trim() : "";
+            // Use task-scoped session when model doesn't specify one
+            const sessionIdValue = modelSessionId || (this.currentTaskId ? (this.taskShellSessions.get(this.currentTaskId) || "") : "");
+            const readOutput = parseBooleanArg(toolCall.args, "read_output", false);
+            const closeSession = parseBooleanArg(toolCall.args, "close_session", false);
+            const waitForCompletion = parseBooleanArg(toolCall.args, "wait_for_completion", true);
+            const timeoutMs = parseNumberArg(toolCall.args, "timeout_ms", 15000);
+            const revealTerminal = parseBooleanArg(toolCall.args, "reveal_terminal", true);
+            const config = vscode.workspace.getConfiguration("sarvamCoder");
+            const captureMode = config.get("execute.captureMode", "terminal");
+
+            if (readOutput) {
+              if (!sessionIdValue) {
+                toolResult = "Missing session_id for read_output=true.";
+              } else {
+                const session = getCommandSession(sessionIdValue);
+                if (!session) {
+                  toolResult = `No active shell session found for '${sessionIdValue}'.`;
+                } else {
+                  toolResult = `Shell session ${session.id} output (latest):\n${tailSessionTranscript(session, 8000)}`;
+                }
+              }
+            } else if (closeSession) {
+              if (!sessionIdValue) {
+                toolResult = "Missing session_id for close_session=true.";
+              } else {
+                const closed = closeCommandSession(sessionIdValue);
+                if (!closed.ok) {
+                  toolResult = closed.message;
+                } else {
+                  toolResult = `${closed.message}\nFinal output:\n${closed.output || "(no output)"}`;
+                }
+              }
+            } else if (!commandValue) {
               toolResult = "No command provided.";
             } else {
               const workspaceFolder = getWorkspaceFolder();
-              const allowCwdOverride = vscode.workspace.getConfiguration("sarvamCoder").get("execute.allowCwdOverride", false);
+              const allowCwdOverride = config.get("execute.allowCwdOverride", false);
               const commandCwd = allowCwdOverride ? resolveCommandCwd(workspaceFolder, cwdValue) : workspaceFolder;
-              const config = vscode.workspace.getConfiguration("sarvamCoder");
-              const captureMode = config.get("execute.captureMode", "terminal");
+
               if (captureMode === "terminal") {
-                toolResult = await runExecuteCommandInTerminal(commandValue, workspaceFolder, vscode.env.shell, commandCwd);
+                const shellResult = await runExecuteCommandInTerminal({
+                  command: commandValue,
+                  shellPath: vscode.env.shell,
+                  cwd: commandCwd,
+                  sessionId: sessionIdValue,
+                  waitForCompletion,
+                  timeoutMs,
+                  revealTerminal
+                });
+                // Remember the session for this task so subsequent commands reuse it
+                if (this.currentTaskId && shellResult.sessionId) {
+                  this.taskShellSessions.set(this.currentTaskId, shellResult.sessionId);
+                }
+                const lines = [
+                  `Shell session: ${shellResult.sessionId}`,
+                  `Working directory: ${shellResult.cwd || commandCwd}`,
+                  `Command: ${shellResult.command || commandValue}`,
+                  `Status: ${shellResult.status}`,
+                  `Output:`,
+                  shellResult.output || "(no output)"
+                ];
+                toolResult = lines.join("\n");
               } else {
                 const showTerminal = config.get("execute.showTerminalOnProcess", false);
                 if (showTerminal) {
-                  ensureCommandTerminal(vscode.env.shell).terminal.show(true);
+                  const quickSession = createCommandSession({ shellPath: vscode.env.shell, cwd: commandCwd });
+                  quickSession.terminal.show(true);
                 }
                 toolResult = await runExecuteCommandInProcess(commandValue, workspaceFolder, vscode.env.shell, commandCwd);
               }
@@ -1730,7 +3016,7 @@ class SarvamViewProvider {
             const absolutePath = ensureWorkspacePath(getWorkspaceFolder(), previewPath);
             const afterSnapshot = readFileSafe(absolutePath);
             if (beforeSnapshot !== afterSnapshot) {
-              void showDiffPreview(absolutePath, beforeSnapshot, afterSnapshot, `Changes: ${previewPath}`);
+              void showDiffPreview(absolutePath, beforeSnapshot, `Changes: ${previewPath}`);
             }
           }
         } catch (error) {
@@ -1744,18 +3030,18 @@ class SarvamViewProvider {
           taskId: this.currentTaskId,
           requestId
         });
+        didAnyToolRun = true;
 
         send({ type: "toolRequestClear" });
-        if (toolCall.name === "update_todo_list") {
+        if (normalizedToolName === "update_todo_list") {
           send({ type: "todoList", value: parseTodoArgs(toolCall.args) });
         }
-        send({ type: "toolResult", value: { name: toolCall.name, result: toolResult } });
         const safeToolResult = escapeToolResultForModel(toolResult);
         const toolSummary = formatToolResultSummary(toolCall, { preWriteExists });
         const summaryText = toolSummary ? ` ${toolSummary}` : "";
         const displayToolResult = `Tool result (${toolCall.name}):${summaryText}\n${toolResult}`;
         const modelToolResult = `Tool result (${toolCall.name}):\n${typeof safeToolResult === 'string' ? safeToolResult : String(safeToolResult)}`;
-        this.history.push(createHistoryEntry("tool-execution", displayToolResult, displayToolResult, modelToolResult));
+        this.history.push(createHistoryEntry("tool-execution", displayToolResult, displayToolResult, modelToolResult, { checkpoint: checkpointRecord }));
         if (activeTask && this.history.length > 0) {
           activeTask.history = this.history;
         }
@@ -1765,11 +3051,25 @@ class SarvamViewProvider {
           currentTaskId: this.currentTaskId
         });
         send({
+          type: "tasks",
+          value: {
+            tasks: this.tasks.map(({ id, title, metrics, history, checkpoints }) => ({
+              id,
+              title,
+              metrics,
+              preview: history && history.length ? (history[0].display || history[0].content) : "",
+              checkpoints: checkpoints || []
+            })),
+            currentTaskId: this.currentTaskId
+          }
+        });
+        send({
           type: "historyAppend",
           value: {
             role: "tool-execution",
-            content: `Tool result (${toolCall.name}):\n${toolResult}`,
-            raw: `Tool result (${toolCall.name}):\n${toolResult}`
+            content: displayToolResult,
+            raw: displayToolResult,
+            checkpoint: checkpointRecord
           }
         });
         messages = buildModelMessages(this.systemPrompt, this.history);
@@ -1780,20 +3080,24 @@ class SarvamViewProvider {
         }
       }
 
-      if (loopGuard >= maxLoops && !finalDelivered) {
-        const notice = "Model stopped after repeated tool calls without a final response.";
-        send({ type: "error", value: notice });
-        logEvent({ level: "error", phase: "response", message: notice, taskId: this.currentTaskId, requestId });
+        if (loopGuard >= maxLoops && !finalDelivered) {
+          const notice = "Model stopped after repeated tool calls without a final response.";
+          send({ type: "error", value: notice });
+          logEvent({ level: "error", phase: "response", message: notice, taskId: this.currentTaskId, requestId });
+        }
+      } finally {
+        this.abortController = null;
+        this.stopRequested = false;
+        this.processing = false;
+        send({ type: "requestState", value: { running: false } });
+        logEvent({
+          level: "info",
+          phase: "response",
+          message: "Request finished",
+          taskId: this.currentTaskId,
+          requestId
+        });
       }
-
-      this.processing = false;
-      logEvent({
-        level: "info",
-        phase: "response",
-        message: "Request finished",
-        taskId: this.currentTaskId,
-        requestId
-      });
     };
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
@@ -1857,6 +3161,12 @@ class SarvamViewProvider {
         return;
       }
 
+      if (message.type === "autoApproveUpdate") {
+        this.autoApprove = normalizeAutoApproveConfig(message.value);
+        send({ type: "autoApprove", value: this.autoApprove });
+        return;
+      }
+
       if (message.type === "showSystemPromptFromLog") {
         const promptValue = String(message.value || this.systemPrompt);
         showSystemPromptPanel(this.context, promptValue);
@@ -1869,6 +3179,65 @@ class SarvamViewProvider {
           return;
         }
         await runModel(content);
+        return;
+      }
+
+      if (message.type === "stopRequest") {
+        if (!this.processing) {
+          return;
+        }
+        this.stopRequested = true;
+        const stopMessage = "[System Message] User stopped the request while it was in progress.";
+        this.history.push(createHistoryEntry("tool-execution", stopMessage, stopMessage, stopMessage));
+        const activeTask = this.tasks.find((task) => task.id === this.currentTaskId);
+        if (activeTask) {
+          activeTask.history = this.history;
+        }
+        saveSarvamState(workspaceFolder, {
+          settings: this.settings,
+          tasks: this.tasks,
+          currentTaskId: this.currentTaskId
+        });
+        send({
+          type: "historyAppend",
+          value: {
+            role: "tool-execution",
+            content: stopMessage,
+            raw: stopMessage
+          }
+        });
+        send({
+          type: "tasks",
+          value: {
+            tasks: this.tasks.map(({ id, title, metrics, history, checkpoints }) => ({
+              id,
+              title,
+              metrics,
+              preview: history && history.length ? (history[0].display || history[0].content) : "",
+              checkpoints: checkpoints || []
+            })),
+            currentTaskId: this.currentTaskId
+          }
+        });
+        if (this.pendingToolDecision) {
+          this.pendingToolDecision("reject");
+          this.pendingToolDecision = null;
+        }
+        if (this.pendingFollowupChoice) {
+          this.pendingFollowupChoice("Skip");
+          this.pendingFollowupChoice = null;
+        }
+        if (this.abortController) {
+          this.abortController.abort();
+        }
+        send({ type: "toolRequestClear" });
+        send({ type: "followupClear" });
+        logEvent({
+          level: "info",
+          phase: "response",
+          message: "Stop requested by user",
+          taskId: this.currentTaskId
+        });
         return;
       }
 
@@ -1888,6 +3257,7 @@ class SarvamViewProvider {
       }
 
       if (message.type === "toolDecision") {
+        this.lastToolDecision = message.value || "reject";
         logEvent({
           level: "info",
           phase: "response",
@@ -1904,6 +3274,10 @@ class SarvamViewProvider {
       }
 
       if (message.type === "addTask") {
+        if (this.processing) {
+          send({ type: "error", value: "Cannot add tasks while a request is running. Please wait for it to finish." });
+          return;
+        }
         const newTaskId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
         const newTask = {
           id: newTaskId,
@@ -1917,6 +3291,7 @@ class SarvamViewProvider {
         this.tasks.unshift(newTask);
         this.currentTaskId = newTaskId;
         this.history = [];
+        this.autoApprove = getDefaultAutoApproveConfig();
         saveSarvamState(workspaceFolder, {
           settings: this.settings,
           tasks: this.tasks,
@@ -1937,16 +3312,22 @@ class SarvamViewProvider {
         });
         send({ type: "history", value: [] });
         send({ type: "metrics", value: { contextLength: 0, inputTokens: 0, outputTokens: 0, contextWindow: defaults.contextWindow } });
+        send({ type: "autoApprove", value: this.autoApprove });
         send({ type: "followupClear" });
         return;
       }
 
       if (message.type === "selectTask") {
+        if (this.processing) {
+          send({ type: "error", value: "Cannot switch tasks while a request is running. Please wait for it to finish." });
+          return;
+        }
         const taskId = message.value;
         const task = this.tasks.find((item) => item.id === taskId);
         if (task) {
           this.currentTaskId = taskId;
           this.history = task.history || [];
+          this.autoApprove = getDefaultAutoApproveConfig();
           saveSarvamState(workspaceFolder, {
             settings: this.settings,
             tasks: this.tasks,
@@ -1954,6 +3335,7 @@ class SarvamViewProvider {
           });
           send({ type: "history", value: buildDisplayHistory(this.history) });
           send({ type: "metrics", value: task.metrics || { contextLength: 0, inputTokens: 0, outputTokens: 0, contextWindow: defaults.contextWindow } });
+          send({ type: "autoApprove", value: this.autoApprove });
           send({
             type: "tasks",
             value: {
@@ -1986,7 +3368,21 @@ class SarvamViewProvider {
       }
 
       if (message.type === "deleteTask") {
+        if (this.processing) {
+          send({ type: "error", value: "Cannot delete tasks while a request is running. Please wait for it to finish." });
+          return;
+        }
         const taskId = message.value;
+        const deletedTask = this.tasks.find((item) => item.id === taskId);
+        if (deletedTask) {
+          deleteTaskCheckpoints(workspaceFolder, deletedTask);
+          // Close and clean up the shell session for the deleted task
+          const deletedSessionId = this.taskShellSessions.get(taskId);
+          if (deletedSessionId) {
+            closeCommandSession(deletedSessionId);
+            this.taskShellSessions.delete(taskId);
+          }
+        }
         this.tasks = this.tasks.filter((item) => item.id !== taskId);
         if (!this.tasks.length) {
           const seedTask = {
@@ -2028,19 +3424,6 @@ class SarvamViewProvider {
         if (!activeTask || !activeTask.followup || !activeTask.followup.selected) {
           send({ type: "followupClear" });
         }
-        send({
-          type: "tasks",
-          value: {
-            tasks: this.tasks.map(({ id, title, metrics, history, checkpoints }) => ({
-              id,
-              title,
-              metrics,
-              preview: history && history.length ? (history[0].display || history[0].content) : "",
-              checkpoints: checkpoints || []
-            })),
-            currentTaskId: this.currentTaskId
-          }
-        });
         return;
       }
 
@@ -2050,7 +3433,47 @@ class SarvamViewProvider {
         const checkpoint = activeTask && activeTask.checkpoints ? activeTask.checkpoints.find((item) => item.id === checkpointId) : null;
         if (checkpoint && checkpoint.files && checkpoint.files.length) {
           try {
-            restoreCheckpointSnapshot(getWorkspaceFolder(), checkpoint);
+            const confirmation = await vscode.window.showWarningMessage(
+              "Restoring this checkpoint will replace file contents and remove all later messages for this task.",
+              { modal: true },
+              "Restore"
+            );
+            if (confirmation !== "Restore") {
+              return;
+            }
+            // Restore all checkpoints up to and including the target checkpoint
+            const checkpoints = Array.isArray(activeTask.checkpoints) ? activeTask.checkpoints : [];
+            const checkpointIndex = checkpoints.findIndex((item) => item.id === checkpointId);
+            if (checkpointIndex >= 0) {
+              const checkpointsToRestore = checkpoints.slice(checkpointIndex).reverse();
+              checkpointsToRestore.forEach((cp) => {
+                if (cp && cp.files && cp.files.length) {
+                  restoreCheckpointSnapshot(getWorkspaceFolder(), cp);
+                }
+              });
+            }
+            pruneTaskAfterCheckpoint(workspaceFolder, activeTask, checkpointId);
+            this.history = activeTask.history || [];
+            saveSarvamState(workspaceFolder, {
+              settings: this.settings,
+              tasks: this.tasks,
+              currentTaskId: this.currentTaskId
+            });
+            send({
+              type: "tasks",
+              value: {
+                tasks: this.tasks.map(({ id, title, metrics, history, checkpoints }) => ({
+                  id,
+                  title,
+                  metrics,
+                  preview: history && history.length ? (history[0].display || history[0].content) : "",
+                  checkpoints: checkpoints || []
+                })),
+                currentTaskId: this.currentTaskId
+              }
+            });
+            send({ type: "history", value: buildDisplayHistory(this.history) });
+            send({ type: "followupClear" });
             send({ type: "toolResult", value: { name: "restore", result: `Restored ${checkpoint.label}` } });
           } catch (error) {
             send({ type: "error", value: error.message });

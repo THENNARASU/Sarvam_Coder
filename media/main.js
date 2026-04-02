@@ -17,6 +17,7 @@ const taskAddButton = document.querySelector(".task-add");
 const taskHistoryButton = document.querySelector(".task-history");
 const historyDoneButton = document.querySelector(".history-done");
 const sendButton = document.querySelector(".send-button");
+const stopButton = document.querySelector(".stop-button");
 const taskPanel = document.querySelector(".task-panel");
 const sendInput = document.querySelector(".ready-input textarea");
 const conversation = document.querySelector(".conversation");
@@ -25,7 +26,9 @@ const contextMax = document.querySelector("[data-context-max]");
 const contextFill = document.querySelector("[data-context-fill]");
 const tokenIn = document.querySelector("[data-tokens-in]");
 const tokenOut = document.querySelector("[data-tokens-out]");
-const autoApproveLabel = document.querySelector("[data-auto-approve]");
+const autoApproveRead = document.querySelector("[data-auto-approve-read]");
+const autoApproveWrite = document.querySelector("[data-auto-approve-write]");
+const autoApproveExecute = document.querySelector("[data-auto-approve-execute]");
 const approvalPanel = document.querySelector(".tool-approval");
 const approvalBody = document.querySelector(".tool-approval__body");
 const approveButton = document.querySelector(".tool-approve");
@@ -40,9 +43,15 @@ const followupCustom = document.querySelector(".followup-custom");
 let selectedFollowupOption = "";
 const historyPanel = document.querySelector(".history-view");
 const historyList = document.querySelector(".history-list");
+const historySearchInput = document.querySelector(".history-search-input");
 const eventLogPanel = document.querySelector(".eventlog-view");
 const eventLogList = document.querySelector(".eventlog-list");
 const eventLogClose = document.querySelector(".eventlog-close");
+const eventLogCopy = document.querySelector(".eventlog-copy");
+let requestRunning = false;
+let historyTasks = [];
+let historyCurrentTaskId = "";
+let historySearchQuery = "";
 
 const defaults = state.defaults || {
 	baseUrl: "",
@@ -158,22 +167,78 @@ const closeHistoryPanel = () => {
 	historyPanel.setAttribute("aria-hidden", "true");
 };
 
-const renderTasks = (tasks, currentTaskId) => {
+const setHistoryControlsDisabled = (disabled) => {
+	requestRunning = Boolean(disabled);
+	if (sendButton) {
+		sendButton.hidden = requestRunning;
+	}
+	if (stopButton) {
+		stopButton.hidden = !requestRunning;
+		stopButton.disabled = !requestRunning;
+		stopButton.setAttribute("aria-disabled", requestRunning ? "false" : "true");
+	}
+	if (taskAddButton) {
+		taskAddButton.disabled = requestRunning;
+		taskAddButton.setAttribute("aria-disabled", requestRunning ? "true" : "false");
+	}
+	if (taskHistoryButton) {
+		taskHistoryButton.disabled = requestRunning;
+		taskHistoryButton.setAttribute("aria-disabled", requestRunning ? "true" : "false");
+	}
+	if (historyPanel) {
+		historyPanel.classList.toggle("is-busy", requestRunning);
+	}
+	if (!historyList) {
+		return;
+	}
+	const controls = historyList.querySelectorAll(".history-item__title, .history-item__open, .history-item__delete");
+	controls.forEach((control) => {
+		control.disabled = requestRunning;
+		control.setAttribute("aria-disabled", requestRunning ? "true" : "false");
+	});
+};
+
+const getTaskDisplayTitle = (task) => {
+	const fallbackTitle = task.preview ? String(task.preview).split("\n")[0] : "Untitled";
+	const defaultTitle = /^Task\s+\d+$/i.test(task.title || "") ? fallbackTitle : task.title;
+	return defaultTitle || fallbackTitle;
+};
+
+const filterHistoryTasks = () => {
+	const query = historySearchQuery.trim().toLowerCase();
+	if (!query) {
+		return historyTasks;
+	}
+	return historyTasks.filter((task) => {
+		const title = getTaskDisplayTitle(task);
+		const preview = task.preview ? String(task.preview) : "";
+		return `${title}\n${preview}`.toLowerCase().includes(query);
+	});
+};
+
+const renderTasks = () => {
 	if (!historyList) {
 		return;
 	}
 	historyList.innerHTML = "";
+	const tasks = filterHistoryTasks();
+	if (!tasks.length) {
+		const empty = document.createElement("div");
+		empty.className = "history-empty";
+		empty.textContent = historySearchQuery.trim() ? "No tasks match your search." : "No task history yet.";
+		historyList.appendChild(empty);
+		return;
+	}
 	tasks.forEach((task) => {
 		const row = document.createElement("div");
-		row.className = `history-item${task.id === currentTaskId ? " is-active" : ""}`;
+		row.className = `history-item${task.id === historyCurrentTaskId ? " is-active" : ""}`;
 		const header = document.createElement("div");
 		header.className = "history-item__header";
 		const title = document.createElement("button");
 		title.type = "button";
 		title.className = "history-item__title";
-		const fallbackTitle = task.preview ? String(task.preview).split("\n")[0] : "Untitled";
-		const defaultTitle = /^Task\s+\d+$/i.test(task.title || "") ? fallbackTitle : task.title;
-		title.textContent = defaultTitle || fallbackTitle;
+		title.disabled = requestRunning;
+		title.textContent = getTaskDisplayTitle(task);
 		title.addEventListener("click", () => {
 			vscode.postMessage({ type: "selectTask", value: task.id });
 			closeHistoryPanel();
@@ -184,59 +249,34 @@ const renderTasks = (tasks, currentTaskId) => {
 		const inputTokens = metrics.inputTokens || 0;
 		const outputTokens = metrics.outputTokens || 0;
 		meta.textContent = `Tokens: ${inputTokens} / ${outputTokens}`;
-
-		let checkpointList = null;
-		if (task.checkpoints && task.checkpoints.length) {
-			checkpointList = document.createElement("div");
-			checkpointList.className = "history-item__checkpoints";
-			task.checkpoints.forEach((checkpoint) => {
-				const checkpointRow = document.createElement("div");
-				checkpointRow.className = "checkpoint-row";
-				const checkpointLabel = document.createElement("span");
-				checkpointLabel.textContent = `${checkpoint.label} (${checkpoint.timestamp})`;
-				const restoreButton = document.createElement("button");
-				restoreButton.type = "button";
-				restoreButton.className = "checkpoint-restore";
-				restoreButton.textContent = "Restore";
-				restoreButton.disabled = !checkpoint.files || !checkpoint.files.length;
-				restoreButton.addEventListener("click", (event) => {
-					event.stopPropagation();
-					vscode.postMessage({ type: "restoreCheckpoint", value: checkpoint.id });
-				});
-				checkpointRow.appendChild(checkpointLabel);
-				checkpointRow.appendChild(restoreButton);
-				checkpointList.appendChild(checkpointRow);
-			});
-		}
 		const actions = document.createElement("div");
 		actions.className = "history-item__actions";
 		const open = document.createElement("button");
 		open.type = "button";
 		open.className = "history-item__open";
+		open.disabled = requestRunning;
 		open.textContent = "Open";
 		open.addEventListener("click", (event) => {
 			event.stopPropagation();
 			vscode.postMessage({ type: "selectTask", value: task.id });
 			closeHistoryPanel();
 		});
-		const del = document.createElement("button");
-		del.type = "button";
-		del.className = "history-item__delete";
-		del.textContent = "Delete";
-		del.addEventListener("click", (event) => {
+		actions.appendChild(open);
+		const deleteBtn = document.createElement("button");
+		deleteBtn.type = "button";
+		deleteBtn.className = "history-item__delete";
+		deleteBtn.disabled = requestRunning;
+		deleteBtn.textContent = "Delete";
+		deleteBtn.addEventListener("click", (event) => {
 			event.stopPropagation();
 			vscode.postMessage({ type: "deleteTask", value: task.id });
 		});
-		actions.appendChild(open);
-		actions.appendChild(del);
+		actions.appendChild(deleteBtn);
 		header.appendChild(title);
 		header.appendChild(actions);
 		const content = document.createElement("div");
 		content.appendChild(header);
 		content.appendChild(meta);
-		if (checkpointList) {
-			content.appendChild(checkpointList);
-		}
 		row.appendChild(content);
 		historyList.appendChild(row);
 	});
@@ -346,7 +386,7 @@ const createMessageBase = (role, contentText) => {
 		       showRightArrow = true;
 	       }
 	       if (showRightArrow) {
-		       icon.textContent = "→";
+		       icon.textContent = "🔧︎";
 		       icon.classList.add("message-icon--tool-green");
 	       } else if (role === "assistant") {
 	       const sarvamIconSrc = shell ? shell.dataset.sarvamIcon || "" : "";
@@ -412,17 +452,18 @@ const formatToolSummaryFromName = (toolName) => {
 	return name.replace(/_/g, " ");
 };
 
-const appendMessage = (role, text, rawText) => {
+const appendMessage = (role, text, rawText, checkpoint) => {
 	const base = createMessageBase(role, text);
 	if (!base) {
 		return null;
 	}
-	const safeText = (typeof text === "string" && text.trim().length > 0) ? text : "(no content)";
+	const safeText = (typeof text === "string" && text.trim().length > 0) ? text : "";
 	const rawValue = typeof rawText === "string" ? rawText : safeText;
-	const assistantDisplay = role === "assistant" ? stripToolXmlClient(rawValue || safeText) : "";
+	const assistantDisplay = role === "assistant" ? (stripToolXmlClient(rawValue || safeText) || safeText) : "";
 	const displayText = role === "assistant" ? assistantDisplay : safeText;
 	const thinking = extractThinking(rawValue);
 	const isToolResult = role === "tool-execution" && /^Tool result \(/i.test(String(safeText));
+	const isCheckpointMessage = role === "tool-execution" && /^Checkpoint created$/i.test(String(safeText).trim());
 	if (isToolResult) {
 		const lines = String(safeText).split(/\r?\n/);
 		const firstLine = lines.shift() || "";
@@ -444,6 +485,26 @@ const appendMessage = (role, text, rawText) => {
 		body.textContent = decodedDetail || "(no output)";
 		details.appendChild(summary);
 		details.appendChild(body);
+		base.content.innerHTML = "";
+		base.content.insertBefore(details, base.content.firstChild);
+	} else if (isCheckpointMessage) {
+		const details = document.createElement("details");
+		details.className = "message-tool-result";
+		const summary = document.createElement("summary");
+		summary.textContent = "Checkpoint created";
+		details.appendChild(summary);
+		if (checkpoint && checkpoint.id) {
+			const restoreButton = document.createElement("button");
+			restoreButton.type = "button";
+			restoreButton.className = "checkpoint-restore checkpoint-restore--message";
+			restoreButton.textContent = "Restore checkpoint";
+			restoreButton.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				vscode.postMessage({ type: "restoreCheckpoint", value: checkpoint.id });
+			});
+			details.appendChild(restoreButton);
+		}
 		base.content.innerHTML = "";
 		base.content.insertBefore(details, base.content.firstChild);
 	} else if (
@@ -583,7 +644,7 @@ const formatEventLogItem = (item) => {
 };
 
 let eventLogItems = [];
-let lastToolResultText = "";
+// Tool result message tracking (removed - using only historyAppend now)
 
 const parseRequestForDisplay = (rawRequest) => {
 	if (!rawRequest) {
@@ -605,6 +666,48 @@ const parseRequestForDisplay = (rawRequest) => {
 	} catch (error) {
 		return { displayText: String(rawRequest), systemPrompt: "" };
 	}
+};
+
+const formatRawResponseForDisplay = (rawResponse) => {
+	const source = String(rawResponse || "");
+	const lines = source
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+
+	if (!lines.length) {
+		return "(empty raw response)";
+	}
+
+	const formatted = [];
+	const combinedChunks = [];
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index];
+		try {
+			const parsed = JSON.parse(line);
+			const deltaContent = parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].delta
+				? parsed.choices[0].delta.content
+				: null;
+			if (typeof deltaContent === "string" && deltaContent.length) {
+				combinedChunks.push(deltaContent);
+			}
+			const suffix = typeof deltaContent === "string" && deltaContent.length
+				? ` delta.content=${JSON.stringify(deltaContent)}`
+				: "";
+			formatted.push(`[chunk ${index + 1}]${suffix}`);
+			formatted.push(JSON.stringify(parsed, null, 2));
+		} catch (error) {
+			// If any line is not JSON, fall back to original raw text.
+			return source;
+		}
+	}
+
+	const combinedText = combinedChunks.join("");
+	if (combinedText) {
+		return combinedText;
+	}
+
+	return source;
 };
 
 const renderEventLog = (items) => {
@@ -662,8 +765,9 @@ const renderEventLog = (items) => {
 			}
 		}
 
-		// Toggle for raw/final response
+		// Toggle for raw/final response (raw stays hidden by default)
 		if (item.rawResponse && item.finalResponse) {
+			const formattedRaw = formatRawResponseForDisplay(item.rawResponse);
 			const toggleBtn = document.createElement("button");
 			toggleBtn.textContent = "Show Raw";
 			toggleBtn.className = "eventlog-toggle";
@@ -674,16 +778,27 @@ const renderEventLog = (items) => {
 			let showingRaw = false;
 			toggleBtn.onclick = () => {
 				showingRaw = !showingRaw;
-				detailLine.textContent = showingRaw ? item.rawResponse : item.finalResponse;
+				detailLine.textContent = showingRaw ? formattedRaw : item.finalResponse;
 				toggleBtn.textContent = showingRaw ? "Show Final" : "Show Raw";
 			};
 			row.appendChild(toggleBtn);
 			row.appendChild(detailLine);
 		} else if (item.rawResponse) {
+			const formattedRaw = formatRawResponseForDisplay(item.rawResponse);
+			const toggleBtn = document.createElement("button");
+			toggleBtn.textContent = "Show Raw";
+			toggleBtn.className = "eventlog-toggle";
 			const detailLine = document.createElement("pre");
 			detailLine.className = "eventlog-row__detail";
 			detailLine.style.whiteSpace = "pre-wrap";
-			detailLine.textContent = item.rawResponse;
+			detailLine.textContent = "(raw response hidden)";
+			let showingRaw = false;
+			toggleBtn.onclick = () => {
+				showingRaw = !showingRaw;
+				detailLine.textContent = showingRaw ? formattedRaw : "(raw response hidden)";
+				toggleBtn.textContent = showingRaw ? "Hide Raw" : "Show Raw";
+			};
+			row.appendChild(toggleBtn);
 			row.appendChild(detailLine);
 		} else if (item.finalResponse) {
 			const detailLine = document.createElement("pre");
@@ -731,22 +846,25 @@ const updateMetrics = (metrics) => {
 	}
 };
 
-const setAutoApproveLabel = (value) => {
-	if (!autoApproveLabel || !value) {
+const getAutoApproveFromControls = () => ({
+	read: Boolean(autoApproveRead && autoApproveRead.checked),
+	write: Boolean(autoApproveWrite && autoApproveWrite.checked),
+	execute: Boolean(autoApproveExecute && autoApproveExecute.checked)
+});
+
+const setAutoApproveControls = (value) => {
+	if (!value || typeof value !== "object") {
 		return;
 	}
-	if (typeof value === "string") {
-		autoApproveLabel.textContent = value;
-		return;
+	if (autoApproveRead) {
+		autoApproveRead.checked = Boolean(value.read);
 	}
-	if (value.other) {
-		autoApproveLabel.textContent = "All except read/write/execute";
-		return;
+	if (autoApproveWrite) {
+		autoApproveWrite.checked = Boolean(value.write);
 	}
-	const enabled = Object.entries(value)
-		.filter(([, enabledValue]) => enabledValue)
-		.map(([key]) => key);
-	autoApproveLabel.textContent = enabled.length ? enabled.join(", ") : "None";
+	if (autoApproveExecute) {
+		autoApproveExecute.checked = Boolean(value.execute);
+	}
 };
 
 const clearToolApproval = () => {
@@ -843,6 +961,7 @@ const showToolApproval = (toolRequest) => {
 	if (!approvalPanel || !approvalBody) {
 		return;
 	}
+	setConversationFlag(true);
 	clearFollowup();
 	if (!toolRequest || !toolRequest.name || toolRequest.name === "thinking" || toolRequest.name === "analysis") {
 		clearToolApproval();
@@ -868,6 +987,7 @@ clearFollowup();
 if (!state.firstRun && !state.hasConversation) {
 	ensureDefaultPrompt(true);
 }
+setHistoryControlsDisabled(false);
 
 if (settingsToggle) {
 	settingsToggle.addEventListener("click", () => {
@@ -877,12 +997,18 @@ if (settingsToggle) {
 
 if (taskAddButton) {
 	taskAddButton.addEventListener("click", () => {
+		if (requestRunning || taskAddButton.disabled) {
+			return;
+		}
 		vscode.postMessage({ type: "addTask" });
 	});
 }
 
 if (taskHistoryButton) {
 	taskHistoryButton.addEventListener("click", () => {
+		if (requestRunning) {
+			return;
+		}
 		toggleHistoryPanel();
 	});
 }
@@ -900,9 +1026,75 @@ if (historyDoneButton) {
 	});
 }
 
+if (historySearchInput) {
+	historySearchInput.addEventListener("input", () => {
+		historySearchQuery = historySearchInput.value || "";
+		renderTasks();
+		setHistoryControlsDisabled(requestRunning);
+	});
+}
+
+const copyEventLog = () => {
+	const lines = [];
+	let currentPhase = null;
+	let currentRequestId = null;
+	(eventLogItems || []).forEach((item) => {
+		const phase = item && item.phase ? String(item.phase).toLowerCase() : "";
+		const requestId = item && item.requestId ? String(item.requestId) : "";
+		if (requestId && requestId !== currentRequestId) {
+			currentRequestId = requestId;
+			currentPhase = null;
+		}
+		if (phase) {
+			currentPhase = phase;
+		} else if (/request started/i.test(item.message || "")) {
+			currentPhase = "request";
+		} else if (/model response received/i.test(item.message || "")) {
+			currentPhase = "response";
+		} else if (!currentPhase) {
+			currentPhase = "request";
+		}
+		const phaseLabel = currentPhase === "response" ? "[RESPONSE]" : "[REQUEST]";
+		lines.push(`${phaseLabel} ${formatEventLogItem(item)}`);
+		if (item.rawRequest) {
+			const requestInfo = parseRequestForDisplay(item.rawRequest);
+			lines.push("--- Request ---");
+			lines.push(requestInfo.displayText || "(empty request)");
+		}
+		if (item.rawResponse) {
+			const formattedRaw = formatRawResponseForDisplay(item.rawResponse);
+			lines.push("--- Raw Response ---");
+			lines.push(formattedRaw);
+		}
+		if (item.finalResponse) {
+			lines.push("--- Final Response ---");
+			lines.push(item.finalResponse);
+		}
+		if (item.detail) {
+			lines.push("--- Detail ---");
+			lines.push(String(item.detail));
+		}
+		lines.push("");
+	});
+	const text = lines.join("\n");
+	navigator.clipboard.writeText(text).then(() => {
+		if (eventLogCopy) {
+			const orig = eventLogCopy.textContent;
+			eventLogCopy.textContent = "Copied!";
+			setTimeout(() => { eventLogCopy.textContent = orig; }, 1500);
+		}
+	}).catch(() => {});
+};
+
 if (eventLogClose) {
 	eventLogClose.addEventListener("click", () => {
 		closeEventLog();
+	});
+}
+
+if (eventLogCopy) {
+	eventLogCopy.addEventListener("click", () => {
+		copyEventLog();
 	});
 }
 
@@ -967,6 +1159,29 @@ if (sendButton) {
   });
 }
 
+if (sendInput) {
+	sendInput.addEventListener("keydown", (event) => {
+		if (event.key !== "Enter" || event.shiftKey || event.isComposing) {
+			return;
+		}
+		const canSend = Boolean(sendButton && !sendButton.hidden && !sendButton.disabled);
+		if (!canSend) {
+			return;
+		}
+		event.preventDefault();
+		sendButton.click();
+	});
+}
+
+if (stopButton) {
+	stopButton.addEventListener("click", () => {
+		if (stopButton.disabled || !requestRunning) {
+			return;
+		}
+		vscode.postMessage({ type: "stopRequest" });
+	});
+}
+
 if (approveButton) {
 	approveButton.addEventListener("click", () => {
 		if (approvalPanel) {
@@ -984,6 +1199,22 @@ if (rejectButton) {
 		vscode.postMessage({ type: "toolDecision", value: "reject" });
 	});
 }
+
+const bindAutoApproveToggle = (element) => {
+	if (!element) {
+		return;
+	}
+	element.addEventListener("change", () => {
+		vscode.postMessage({
+			type: "autoApproveUpdate",
+			value: getAutoApproveFromControls()
+		});
+	});
+};
+
+bindAutoApproveToggle(autoApproveRead);
+bindAutoApproveToggle(autoApproveWrite);
+bindAutoApproveToggle(autoApproveExecute);
 
 if (followupSend) {
 	followupSend.addEventListener("click", () => {
@@ -1036,7 +1267,11 @@ window.addEventListener("message", (event) => {
 			const content = activeAssistant.querySelector(".message-content");
 			if (content) {
 				const stripped = stripToolXmlClient(activeAssistantRaw);
-				content.textContent = sanitizeAssistantText(stripped);
+				// stripToolXmlClient only removes closed <thinking>...</thinking> blocks.
+				// Any unclosed (still-streaming) <thinking> block would leak into the
+				// visible text. Remove it here so only the non-thinking prose shows.
+				const hiddenPartial = stripped.replace(/<thinking>[\s\S]*/gi, "");
+				content.textContent = sanitizeAssistantText(hiddenPartial);
 			}
 			updateStreamingThinking(activeAssistant, activeAssistantRaw);
 		}
@@ -1051,12 +1286,26 @@ window.addEventListener("message", (event) => {
 			if (activeAssistant) {
 				const content = activeAssistant.querySelector(".message-content");
 				if (content) {
-					content.textContent = displayText;
+					// Only overwrite the streaming text if there is settled display
+					// text. When the full response was a bare tool call (no prose),
+					// displayText is empty but the streaming delta may have shown
+					// partial prose — clearing it would erase visible content and
+					// leave only the "Show thinking" block.
+					if (displayText) {
+						content.textContent = displayText;
+					}
+					// If still empty after settling, preserve whatever the streaming
+					// deltas left so the user can see the model's preamble text.
 				}
 				attachThinkingToMessage(activeAssistant, message.value.raw || message.value.text);
 				if (!displayText && !extractThinking(message.value.raw || message.value.text)) {
-					activeAssistant.remove();
-					activeAssistant = null;
+					// Only remove the bubble if there is truly nothing to show
+					// (no display text and no thinking content).
+					const streamedText = content ? content.textContent.trim() : "";
+					if (!streamedText) {
+						activeAssistant.remove();
+						activeAssistant = null;
+					}
 				}
 			} else {
 				if (displayText) {
@@ -1101,10 +1350,7 @@ window.addEventListener("message", (event) => {
 
 	if (message.type === "toolResult") {
 		clearToolApproval();
-		// Tool result is from client-side tool execution, use right arrow icon
-		const formatted = `Tool result (${message.value.name}):\n${message.value.result}`;
-		lastToolResultText = formatted;
-		appendMessage("tool-execution", formatted, formatted);
+		// Tool result is superseded by historyAppend, no need to display separately
 	}
 
 	if (message.type === "todoList") {
@@ -1156,7 +1402,7 @@ window.addEventListener("message", (event) => {
 					       role === "tool-execution" ||
 					       role === "forward"
 				       ) {
-						appendMessage(role, entry.content, entry.raw);
+						appendMessage(role, entry.content, entry.raw, entry.checkpoint || null);
 				       }
 			       });
 		setConversationFlag(message.value.length > 0);
@@ -1168,11 +1414,18 @@ window.addEventListener("message", (event) => {
 
 	if (message.type === "tasks") {
 		const payload = message.value || {};
-		renderTasks(payload.tasks || [], payload.currentTaskId);
+		historyTasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+		historyCurrentTaskId = payload.currentTaskId || "";
+		renderTasks();
+		setHistoryControlsDisabled(requestRunning);
+	}
+
+	if (message.type === "requestState") {
+		setHistoryControlsDisabled(Boolean(message.value && message.value.running));
 	}
 
 	if (message.type === "autoApprove") {
-		setAutoApproveLabel(message.value);
+		setAutoApproveControls(message.value);
 	}
 
 	if (message.type === "error") {
@@ -1191,11 +1444,7 @@ window.addEventListener("message", (event) => {
 			) {
 				entry.role = "tool-execution";
 			}
-			if (entry.role === "tool-execution" && entry.content && entry.content === lastToolResultText) {
-				lastToolResultText = "";
-				return;
-			}
-			appendMessage(entry.role, entry.content || "", entry.raw);
+			appendMessage(entry.role, entry.content || "", entry.raw, entry.checkpoint || null);
 			setConversationFlag(true);
 		}
 	}
