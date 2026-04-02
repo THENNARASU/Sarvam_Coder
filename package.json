@@ -1,11 +1,15 @@
 {
-  "name": "sarvam-coder-minimal",
+  "name": "sarvam-coder",
   "version": "1.0.0",
   "private": true,
   "description": "Sarvam Coder VS Code extension with Read/Write/Execute only",
   "displayName": "Sarvam Coder",
   "icon": "resources/sarvam.png",
-  "publisher": "sarvam",
+  "publisher": "AllyTopic",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/THENNARASU/Sarvam_Coder.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
