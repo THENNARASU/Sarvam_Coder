@@ -1,0 +1,116 @@
+{
+  "name": "sarvam-coder-minimal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sarvam Coder VS Code extension with Read/Write/Execute only",
+  "displayName": "Sarvam Coder",
+  "icon": "resources/sarvam.png",
+  "publisher": "sarvam",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "extension.js",
+  "enabledApiProposals": [
+    "timeline"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Sarvam Coder",
+      "properties": {
+        "sarvamCoder.autoApprove.read": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-approve read_file tool requests."
+        },
+        "sarvamCoder.autoApprove.write": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-approve write_to_file tool requests."
+        },
+        "sarvamCoder.autoApprove.execute": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-approve execute_command tool requests."
+        },
+        "sarvamCoder.autoApprove.todo": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-approve update_todo_list tool requests."
+        },
+        "sarvamCoder.execute.captureMode": {
+          "type": "string",
+          "enum": [
+            "process",
+            "terminal"
+          ],
+          "default": "process",
+          "description": "How execute_command runs shell commands. 'process' captures output without terminal markers; 'terminal' uses the shared terminal and shows markers."
+        },
+        "sarvamCoder.execute.allowCwdOverride": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow execute_command to override the working directory via tool args. When false, commands always run in the workspace folder."
+        },
+        "sarvamCoder.execute.showTerminalOnProcess": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the Sarvam: Commands terminal when execute_command runs in process mode. Commands still run in-process; the terminal is only revealed."
+        },
+        "sarvamCoder.tool.maxRepeat": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Maximum number of repeated tool calls allowed for identical tool signatures in a single request. 0 disables repeats."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "sarvamCoder.open",
+        "title": "Sarvam: Open Sidebar"
+      },
+      {
+        "command": "sarvamCoder.reload",
+        "title": "Sarvam: Reload Extension"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "sarvamCoder.reload",
+          "icon": "$(refresh)",
+          "when": "view == sarvamCoder.sidebar && sarvamCoder.isDevelopment",
+          "group": "navigation"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sarvam",
+          "title": "Sarvam",
+          "icon": "resources/sarvam.svg"
+        }
+      ]
+    },
+    "views": {
+      "sarvam": [
+        {
+          "id": "sarvamCoder.sidebar",
+          "name": "Sarvam Coder",
+          "type": "webview"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "launch:extension": "node scripts/launch-extension.js",
+    "verify": "npm run launch:extension"
+  }
+}

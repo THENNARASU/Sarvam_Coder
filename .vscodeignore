@@ -1,0 +1,5 @@
+node_modules/**
+.saram/**
+static/**
+server.js
+scripts/verify.js
